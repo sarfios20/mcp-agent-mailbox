@@ -85,7 +85,7 @@ func TestSendRejectsInjectedSender(t *testing.T) {
 	ana := connectTestClient(t, server.URL+"/mcp", testTokens["ana"])
 
 	result, err := ana.CallTool(context.Background(), &mcp.CallToolParams{Name: "send", Arguments: map[string]any{
-		"to":      "bea",
+		"to":      []string{"bea"},
 		"subject": "status",
 		"text":    "spoofed message",
 		"sender":  "bea",
@@ -114,7 +114,7 @@ func TestSendAppearsInRecipientsInbox(t *testing.T) {
 	bea := connectTestClient(t, server.URL+"/mcp", testTokens["bea"])
 
 	sent := callTool[sendOutput](t, ana, "send", map[string]any{
-		"to":      "bea",
+		"to":      []string{"bea"},
 		"subject": "delivery",
 		"text":    "done",
 	})
@@ -125,8 +125,8 @@ func TestSendAppearsInRecipientsInbox(t *testing.T) {
 	if got := inbox.Threads[0].ThreadID; got != sent.ThreadID {
 		t.Fatalf("thread_id = %d, want %d", got, sent.ThreadID)
 	}
-	if got := inbox.Threads[0].With; got != "ana" {
-		t.Fatalf("with = %q, want %q", got, "ana")
+	if got := inbox.Threads[0].Participants; len(got) != 2 || got[0] != "ana" || got[1] != "bea" {
+		t.Fatalf("participants = %q, want [ana bea]", got)
 	}
 }
 

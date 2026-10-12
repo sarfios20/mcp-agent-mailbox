@@ -1,9 +1,10 @@
-// Package mailbox stores and retrieves two-participant message threads.
+// Package mailbox stores and retrieves message threads with per-participant receipts.
 package mailbox
 
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,27 +25,26 @@ type Store struct {
 type Message struct {
 	ID        int64
 	Sender    string
-	Recipient string
 	Content   string
 	CreatedAt time.Time
-	ReadAt    *time.Time
+	Unread    bool
 }
 
 // Thread is a conversation and its messages, ordered from oldest to newest.
 type Thread struct {
-	ID       int64
-	Subject  string
-	With     string
-	Messages []Message
+	ID           int64
+	Subject      string
+	Participants []string
+	Messages     []Message
 }
 
 // InboxEntry summarizes a thread containing unread messages for a participant.
 type InboxEntry struct {
-	ThreadID int64
-	Subject  string
-	With     string
-	Unread   int
-	LastAt   time.Time
+	ThreadID     int64
+	Subject      string
+	Participants []string
+	Unread       int
+	LastAt       time.Time
 }
 
 // Open opens a mailbox database and creates its schema when necessary.
@@ -71,18 +71,27 @@ func Open(path string, participants []string) (*Store, error) {
 CREATE TABLE IF NOT EXISTS threads (
     id INTEGER PRIMARY KEY,
     subject TEXT,
-    a TEXT,
-    b TEXT,
+    created_by TEXT,
     created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS thread_members (
+    thread_id INTEGER REFERENCES threads,
+    participant TEXT,
+    added_at TEXT,
+    PRIMARY KEY (thread_id, participant)
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
     thread_id INTEGER REFERENCES threads,
     sender TEXT,
-    recipient TEXT,
     content TEXT,
-    created_at TEXT,
-    read_at TEXT NULL
+    created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS receipts (
+    message_id INTEGER REFERENCES messages,
+    participant TEXT,
+    read_at TEXT NULL,
+    PRIMARY KEY (message_id, participant)
 );`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -101,16 +110,47 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// Send creates a thread and its first unread message from me to to.
-func (s *Store) Send(me, to, subject, text string) (threadID int64, err error) {
+// Participants returns every currently configured participant, sorted by name.
+func (s *Store) Participants() []string {
+	names := make([]string, 0, len(s.participants))
+	for name := range s.participants {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Send creates a thread with me and the recipients, expanding ["*"] at send time.
+func (s *Store) Send(me string, to []string, subject, text string) (threadID int64, err error) {
 	if err := s.validateParticipant(me); err != nil {
 		return 0, err
 	}
-	if err := s.validateParticipant(to); err != nil {
-		return 0, err
+	if len(to) == 1 && to[0] == "*" {
+		to = make([]string, 0, len(s.participants)-1)
+		for _, name := range s.Participants() {
+			if name != me {
+				to = append(to, name)
+			}
+		}
 	}
-	if me == to {
-		return 0, fmt.Errorf("recipient %q is the sender %q", to, me)
+	if len(to) == 0 {
+		return 0, fmt.Errorf("recipients %q are empty", to)
+	}
+	seen := make(map[string]struct{}, len(to))
+	for _, name := range to {
+		if name == "*" {
+			return 0, fmt.Errorf("recipient %q must be the only recipient in %q", name, to)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return 0, fmt.Errorf("recipient %q is duplicated", name)
+		}
+		seen[name] = struct{}{}
+		if name == me {
+			return 0, fmt.Errorf("recipient %q is the sender %q", name, me)
+		}
+		if err := s.validateParticipant(name); err != nil {
+			return 0, err
+		}
 	}
 	if strings.TrimSpace(subject) == "" {
 		return 0, fmt.Errorf("subject %q is empty", subject)
@@ -123,17 +163,9 @@ func (s *Store) Send(me, to, subject, text string) (threadID int64, err error) {
 	if err != nil {
 		return 0, fmt.Errorf("begin sending from %q to %q: %w", me, to, err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
+	defer tx.Rollback()
 	now := time.Now().UTC().Format(timeLayout)
-	result, err := tx.Exec(
-		"INSERT INTO threads(subject, a, b, created_at) VALUES (?, ?, ?, ?)",
-		subject, me, to, now,
-	)
+	result, err := tx.Exec("INSERT INTO threads(subject, created_by, created_at) VALUES (?, ?, ?)", subject, me, now)
 	if err != nil {
 		return 0, fmt.Errorf("create thread from %q to %q with subject %q: %w", me, to, subject, err)
 	}
@@ -141,11 +173,14 @@ func (s *Store) Send(me, to, subject, text string) (threadID int64, err error) {
 	if err != nil {
 		return 0, fmt.Errorf("get id for thread from %q to %q: %w", me, to, err)
 	}
-	if _, err = tx.Exec(
-		"INSERT INTO messages(thread_id, sender, recipient, content, created_at) VALUES (?, ?, ?, ?, ?)",
-		threadID, me, to, text, now,
-	); err != nil {
-		return 0, fmt.Errorf("create message in thread %d from %q to %q: %w", threadID, me, to, err)
+	members := append([]string{me}, to...)
+	for _, name := range members {
+		if _, err = tx.Exec("INSERT INTO thread_members(thread_id, participant, added_at) VALUES (?, ?, ?)", threadID, name, now); err != nil {
+			return 0, fmt.Errorf("add participant %q to thread %d: %w", name, threadID, err)
+		}
+	}
+	if _, err = insertMessage(tx, me, threadID, text, now); err != nil {
+		return 0, err
 	}
 	if err = tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit thread %d from %q to %q: %w", threadID, me, to, err)
@@ -153,7 +188,7 @@ func (s *Store) Send(me, to, subject, text string) (threadID int64, err error) {
 	return threadID, nil
 }
 
-// Reply appends an unread message addressed to the other thread participant.
+// Reply appends a message with unread receipts for every other thread member.
 func (s *Store) Reply(me string, threadID int64, text string) (messageID int64, err error) {
 	if err := s.validateParticipant(me); err != nil {
 		return 0, err
@@ -161,35 +196,47 @@ func (s *Store) Reply(me string, threadID int64, text string) (messageID int64, 
 	if strings.TrimSpace(text) == "" {
 		return 0, fmt.Errorf("text %q is empty for thread %d", text, threadID)
 	}
-
-	var a, b string
-	if err := s.db.QueryRow("SELECT a, b FROM threads WHERE id = ?", threadID).Scan(&a, &b); err != nil {
-		if err == sql.ErrNoRows {
-			return 0, fmt.Errorf("thread %d does not exist", threadID)
-		}
-		return 0, fmt.Errorf("look up thread %d for %q: %w", threadID, me, err)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin replying to thread %d as %q: %w", threadID, me, err)
 	}
-	recipient, err := otherParticipant(me, threadID, a, b)
+	defer tx.Rollback()
+	members, err := threadParticipants(tx, threadID)
 	if err != nil {
 		return 0, err
 	}
-
-	result, err := s.db.Exec(
-		"INSERT INTO messages(thread_id, sender, recipient, content, created_at) VALUES (?, ?, ?, ?, ?)",
-		threadID, me, recipient, text, time.Now().UTC().Format(timeLayout),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("reply to thread %d as %q: %w", threadID, me, err)
+	if err := requireMember(me, threadID, members); err != nil {
+		return 0, err
 	}
-	messageID, err = result.LastInsertId()
+	messageID, err = insertMessage(tx, me, threadID, text, time.Now().UTC().Format(timeLayout))
 	if err != nil {
-		return 0, fmt.Errorf("get message id for thread %d as %q: %w", threadID, me, err)
+		return 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit reply to thread %d as %q: %w", threadID, me, err)
 	}
 	return messageID, nil
 }
 
-// ReadThread returns a participant's thread and marks only messages received by
-// that participant as read.
+// insertMessage inserts a message and its recipients' receipts in the caller's transaction.
+func insertMessage(tx *sql.Tx, me string, threadID int64, text, now string) (int64, error) {
+	result, err := tx.Exec("INSERT INTO messages(thread_id, sender, content, created_at) VALUES (?, ?, ?, ?)", threadID, me, text, now)
+	if err != nil {
+		return 0, fmt.Errorf("create message in thread %d from %q: %w", threadID, me, err)
+	}
+	messageID, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("get message id for thread %d as %q: %w", threadID, me, err)
+	}
+	if _, err := tx.Exec(`INSERT INTO receipts(message_id, participant)
+SELECT ?, participant FROM thread_members WHERE thread_id = ? AND participant != ?`, messageID, threadID, me); err != nil {
+		return 0, fmt.Errorf("create receipts for message %d from %q: %w", messageID, me, err)
+	}
+	return messageID, nil
+}
+
+// ReadThread returns a member's thread with Unread reflecting the state before
+// this call, then marks only that member's receipts read.
 func (s *Store) ReadThread(me string, threadID int64) (thread Thread, err error) {
 	if err := s.validateParticipant(me); err != nil {
 		return Thread{}, err
@@ -199,38 +246,29 @@ func (s *Store) ReadThread(me string, threadID int64) (thread Thread, err error)
 	if err != nil {
 		return Thread{}, fmt.Errorf("begin reading thread %d as %q: %w", threadID, me, err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	var a, b string
+	defer tx.Rollback()
 	thread.ID = threadID
-	if err = tx.QueryRow("SELECT subject, a, b FROM threads WHERE id = ?", threadID).Scan(&thread.Subject, &a, &b); err != nil {
+	if err = tx.QueryRow("SELECT subject FROM threads WHERE id = ?", threadID).Scan(&thread.Subject); err != nil {
 		if err == sql.ErrNoRows {
 			return Thread{}, fmt.Errorf("thread %d does not exist", threadID)
 		}
 		return Thread{}, fmt.Errorf("look up thread %d for %q: %w", threadID, me, err)
 	}
-	thread.With, err = otherParticipant(me, threadID, a, b)
+	thread.Participants, err = threadParticipants(tx, threadID)
 	if err != nil {
 		return Thread{}, err
 	}
-
-	readAt := time.Now().UTC().Format(timeLayout)
-	if _, err = tx.Exec(
-		"UPDATE messages SET read_at = ? WHERE thread_id = ? AND recipient = ? AND read_at IS NULL",
-		readAt, threadID, me,
-	); err != nil {
-		return Thread{}, fmt.Errorf("mark thread %d read for %q: %w", threadID, me, err)
+	if err = requireMember(me, threadID, thread.Participants); err != nil {
+		return Thread{}, err
 	}
 
 	rows, err := tx.Query(`
-SELECT id, sender, recipient, content, created_at, read_at
-FROM messages
-WHERE thread_id = ?
-ORDER BY id`, threadID)
+SELECT m.id, m.sender, m.content, m.created_at,
+       r.message_id IS NOT NULL AND r.read_at IS NULL
+FROM messages AS m
+LEFT JOIN receipts AS r ON r.message_id = m.id AND r.participant = ?
+WHERE m.thread_id = ?
+ORDER BY m.id`, me, threadID)
 	if err != nil {
 		return Thread{}, fmt.Errorf("list messages in thread %d for %q: %w", threadID, me, err)
 	}
@@ -238,22 +276,14 @@ ORDER BY id`, threadID)
 	for rows.Next() {
 		var message Message
 		var createdAt string
-		var readAt sql.NullString
 		if err = rows.Scan(
-			&message.ID, &message.Sender, &message.Recipient, &message.Content, &createdAt, &readAt,
+			&message.ID, &message.Sender, &message.Content, &createdAt, &message.Unread,
 		); err != nil {
 			return Thread{}, fmt.Errorf("scan message in thread %d for %q: %w", threadID, me, err)
 		}
 		message.CreatedAt, err = parseTime(createdAt, "created_at", message.ID)
 		if err != nil {
 			return Thread{}, err
-		}
-		if readAt.Valid {
-			parsed, parseErr := parseTime(readAt.String, "read_at", message.ID)
-			if parseErr != nil {
-				return Thread{}, parseErr
-			}
-			message.ReadAt = &parsed
 		}
 		thread.Messages = append(thread.Messages, message)
 	}
@@ -262,6 +292,11 @@ ORDER BY id`, threadID)
 	}
 	if err = rows.Close(); err != nil {
 		return Thread{}, fmt.Errorf("close messages in thread %d for %q: %w", threadID, me, err)
+	}
+	if _, err = tx.Exec(`UPDATE receipts SET read_at = ?
+WHERE participant = ? AND read_at IS NULL
+  AND message_id IN (SELECT id FROM messages WHERE thread_id = ?)`, time.Now().UTC().Format(timeLayout), me, threadID); err != nil {
+		return Thread{}, fmt.Errorf("mark thread %d read for %q: %w", threadID, me, err)
 	}
 	if err = tx.Commit(); err != nil {
 		return Thread{}, fmt.Errorf("commit reading thread %d as %q: %w", threadID, me, err)
@@ -275,21 +310,19 @@ func (s *Store) Inbox(me string) ([]InboxEntry, error) {
 		return nil, err
 	}
 
-	rows, err := s.db.Query(`
-SELECT t.id, t.subject,
-       CASE WHEN t.a = ? THEN t.b ELSE t.a END,
-       COUNT(unread.id),
-       (SELECT MAX(message.created_at)
-          FROM messages AS message
-         WHERE message.thread_id = t.id)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin listing inbox for %q: %w", me, err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`
+SELECT t.id, t.subject, COUNT(r.message_id),
+       (SELECT MAX(created_at) FROM messages WHERE thread_id = t.id)
 FROM threads AS t
-JOIN messages AS unread
-  ON unread.thread_id = t.id
- AND unread.recipient = ?
- AND unread.read_at IS NULL
-WHERE t.a = ? OR t.b = ?
-GROUP BY t.id, t.subject, t.a, t.b
-ORDER BY 5 DESC, t.id DESC`, me, me, me, me)
+JOIN messages AS m ON m.thread_id = t.id
+JOIN receipts AS r ON r.message_id = m.id AND r.participant = ? AND r.read_at IS NULL
+GROUP BY t.id, t.subject
+ORDER BY 4 DESC, t.id DESC`, me)
 	if err != nil {
 		return nil, fmt.Errorf("list inbox for %q: %w", me, err)
 	}
@@ -299,7 +332,7 @@ ORDER BY 5 DESC, t.id DESC`, me, me, me, me)
 	for rows.Next() {
 		var entry InboxEntry
 		var lastAt string
-		if err := rows.Scan(&entry.ThreadID, &entry.Subject, &entry.With, &entry.Unread, &lastAt); err != nil {
+		if err := rows.Scan(&entry.ThreadID, &entry.Subject, &entry.Unread, &lastAt); err != nil {
 			return nil, fmt.Errorf("scan inbox entry for %q: %w", me, err)
 		}
 		entry.LastAt, err = parseTime(lastAt, "created_at", entry.ThreadID)
@@ -311,6 +344,18 @@ ORDER BY 5 DESC, t.id DESC`, me, me, me, me)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list inbox for %q: %w", me, err)
 	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close inbox for %q: %w", me, err)
+	}
+	for i := range entries {
+		entries[i].Participants, err = threadParticipants(tx, entries[i].ThreadID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit listing inbox for %q: %w", me, err)
+	}
 	return entries, nil
 }
 
@@ -321,15 +366,38 @@ func (s *Store) validateParticipant(name string) error {
 	return nil
 }
 
-func otherParticipant(me string, threadID int64, a, b string) (string, error) {
-	switch me {
-	case a:
-		return b, nil
-	case b:
-		return a, nil
-	default:
-		return "", fmt.Errorf("participant %q does not belong to thread %d", me, threadID)
+// threadParticipants lists the persisted members within the caller's transaction.
+func threadParticipants(tx *sql.Tx, threadID int64) ([]string, error) {
+	rows, err := tx.Query("SELECT participant FROM thread_members WHERE thread_id = ? ORDER BY participant", threadID)
+	if err != nil {
+		return nil, fmt.Errorf("list participants in thread %d: %w", threadID, err)
 	}
+	defer rows.Close()
+	var members []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan participant in thread %d: %w", threadID, err)
+		}
+		members = append(members, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list participants in thread %d: %w", threadID, err)
+	}
+	if len(members) == 0 {
+		return nil, fmt.Errorf("thread %d does not exist", threadID)
+	}
+	return members, nil
+}
+
+// requireMember rejects access by anyone outside the thread.
+func requireMember(me string, threadID int64, members []string) error {
+	for _, name := range members {
+		if name == me {
+			return nil
+		}
+	}
+	return fmt.Errorf("participant %q does not belong to thread %d", me, threadID)
 }
 
 func parseTime(value, field string, id int64) (time.Time, error) {

@@ -23,6 +23,12 @@ const serverVersion = "1.0.0"
 
 type inboxInput struct{}
 
+type participantsInput struct{}
+
+type participantsOutput struct {
+	Participants []string `json:"participants" jsonschema:"Every current participant name, sorted"`
+}
+
 type readThreadInput struct {
 	ThreadID int64 `json:"thread_id" jsonschema:"ID of the thread to read"`
 }
@@ -33,9 +39,9 @@ type replyInput struct {
 }
 
 type sendInput struct {
-	To      string `json:"to" jsonschema:"Recipient participant name"`
-	Subject string `json:"subject" jsonschema:"Subject of the new thread"`
-	Text    string `json:"text" jsonschema:"First message text"`
+	To      []string `json:"to" jsonschema:"Recipient participant names or [\"*\"] for every other current participant"`
+	Subject string   `json:"subject" jsonschema:"Subject of the new thread"`
+	Text    string   `json:"text" jsonschema:"First message text"`
 }
 
 type inboxOutput struct {
@@ -43,11 +49,11 @@ type inboxOutput struct {
 }
 
 type inboxEntryOutput struct {
-	ThreadID int64  `json:"thread_id"`
-	Subject  string `json:"subject"`
-	With     string `json:"with"`
-	Unread   int    `json:"unread"`
-	LastAt   string `json:"last_at"`
+	ThreadID     int64    `json:"thread_id"`
+	Subject      string   `json:"subject"`
+	Participants []string `json:"participants"`
+	Unread       int      `json:"unread"`
+	LastAt       string   `json:"last_at"`
 }
 
 type readThreadOutput struct {
@@ -55,19 +61,18 @@ type readThreadOutput struct {
 }
 
 type threadOutput struct {
-	ID       int64           `json:"id"`
-	Subject  string          `json:"subject"`
-	With     string          `json:"with"`
-	Messages []messageOutput `json:"messages"`
+	ID           int64           `json:"id"`
+	Subject      string          `json:"subject"`
+	Participants []string        `json:"participants"`
+	Messages     []messageOutput `json:"messages"`
 }
 
 type messageOutput struct {
-	ID        int64   `json:"id"`
-	Sender    string  `json:"sender"`
-	Recipient string  `json:"recipient"`
-	Content   string  `json:"content"`
-	CreatedAt string  `json:"created_at"`
-	ReadAt    *string `json:"read_at"`
+	ID        int64  `json:"id"`
+	Sender    string `json:"sender"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
+	Unread    bool   `json:"unread"`
 }
 
 type replyOutput struct {
@@ -85,7 +90,7 @@ func newHandler(store *mailbox.Store, tokens map[string]string) http.Handler {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "inbox",
-		Description: "Lists threads containing unread messages addressed to the authenticated participant.",
+		Description: "Lists threads with unread receipts for the authenticated participant, including all thread participants.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, _ inboxInput) (*mcp.CallToolResult, inboxOutput, error) {
 		me, err := authenticatedName(req)
 		if err != nil {
@@ -98,11 +103,11 @@ func newHandler(store *mailbox.Store, tokens map[string]string) http.Handler {
 		out := inboxOutput{Threads: make([]inboxEntryOutput, 0, len(entries))}
 		for _, entry := range entries {
 			out.Threads = append(out.Threads, inboxEntryOutput{
-				ThreadID: entry.ThreadID,
-				Subject:  entry.Subject,
-				With:     entry.With,
-				Unread:   entry.Unread,
-				LastAt:   entry.LastAt.Format(time.RFC3339Nano),
+				ThreadID:     entry.ThreadID,
+				Subject:      entry.Subject,
+				Participants: entry.Participants,
+				Unread:       entry.Unread,
+				LastAt:       entry.LastAt.Format(time.RFC3339Nano),
 			})
 		}
 		return nil, out, nil
@@ -110,7 +115,7 @@ func newHandler(store *mailbox.Store, tokens map[string]string) http.Handler {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "read_thread",
-		Description: "Returns a complete thread and marks only messages received by the authenticated participant as read.",
+		Description: "Returns a complete thread with its participants and each message’s unread state before this call, then marks only the authenticated participant’s receipts read.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input readThreadInput) (*mcp.CallToolResult, readThreadOutput, error) {
 		me, err := authenticatedName(req)
 		if err != nil {
@@ -125,7 +130,7 @@ func newHandler(store *mailbox.Store, tokens map[string]string) http.Handler {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "reply",
-		Description: "Adds a reply to the thread addressed to the other participant; the sender is always the authenticated participant.",
+		Description: "Adds a reply to every other thread member; the sender is always the authenticated participant and must belong to the thread.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input replyInput) (*mcp.CallToolResult, replyOutput, error) {
 		me, err := authenticatedName(req)
 		if err != nil {
@@ -140,7 +145,7 @@ func newHandler(store *mailbox.Store, tokens map[string]string) http.Handler {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "send",
-		Description: "Creates a thread and sends its first message; the sender is always the authenticated participant.",
+		Description: "Creates a thread with the recipient names in to, or [\"*\"] for every other current participant, and sends its first message; the sender is always the authenticated participant.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input sendInput) (*mcp.CallToolResult, sendOutput, error) {
 		me, err := authenticatedName(req)
 		if err != nil {
@@ -151,6 +156,16 @@ func newHandler(store *mailbox.Store, tokens map[string]string) http.Handler {
 			return nil, sendOutput{}, err
 		}
 		return nil, sendOutput{ThreadID: threadID}, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "participants",
+		Description: "Lists every currently configured participant name, sorted.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, _ participantsInput) (*mcp.CallToolResult, participantsOutput, error) {
+		if _, err := authenticatedName(req); err != nil {
+			return nil, participantsOutput{}, err
+		}
+		return nil, participantsOutput{Participants: store.Participants()}, nil
 	})
 
 	verifier := func(_ context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
@@ -194,22 +209,18 @@ func authenticatedName(req *mcp.CallToolRequest) (string, error) {
 
 func translateThread(thread mailbox.Thread) threadOutput {
 	out := threadOutput{
-		ID:       thread.ID,
-		Subject:  thread.Subject,
-		With:     thread.With,
-		Messages: make([]messageOutput, 0, len(thread.Messages)),
+		ID:           thread.ID,
+		Subject:      thread.Subject,
+		Participants: thread.Participants,
+		Messages:     make([]messageOutput, 0, len(thread.Messages)),
 	}
 	for _, message := range thread.Messages {
 		translated := messageOutput{
 			ID:        message.ID,
 			Sender:    message.Sender,
-			Recipient: message.Recipient,
 			Content:   message.Content,
 			CreatedAt: message.CreatedAt.Format(time.RFC3339Nano),
-		}
-		if message.ReadAt != nil {
-			readAt := message.ReadAt.Format(time.RFC3339Nano)
-			translated.ReadAt = &readAt
+			Unread:    message.Unread,
 		}
 		out.Messages = append(out.Messages, translated)
 	}
