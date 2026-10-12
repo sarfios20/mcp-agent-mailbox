@@ -184,16 +184,17 @@ func newSSHServer(store *mailbox.Store, dataDir string, port int) (*gliderssh.Se
 				}
 				args := strings.Fields(command.Command)
 				if joiner && len(args) == 2 && args[0] == "join" {
-					defer conn.Close()
 					_ = request.Reply(true, nil)
 					hash := sha256.Sum256([]byte(args[1]))
 					name, host, err := store.Join(fmt.Sprintf("%x", hash), publicKey, time.Now())
 					if err != nil {
 						recordFailure(ctx.RemoteAddr())
 						refuseChannel(channel, err.Error())
-						_ = channel.Close()
+						_ = conn.Close()
 						return
 					}
+					// On success the client closes the connection itself after the exit
+					// status; joinTimeout closes it if the client does not.
 					if err := json.NewEncoder(channel).Encode(map[string]any{"name": name, "client": admin.ClientCommands(host, port, signer.PublicKey())}); err != nil {
 						refuseChannel(channel, "join output failed")
 					} else {
