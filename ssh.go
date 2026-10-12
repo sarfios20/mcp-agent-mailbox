@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -20,6 +21,7 @@ import (
 
 	gliderssh "github.com/gliderlabs/ssh"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sarfios20/mcp-agent-mailbox/admin"
 	"github.com/sarfios20/mcp-agent-mailbox/mailbox"
 	"golang.org/x/crypto/ssh"
 )
@@ -27,14 +29,16 @@ import (
 type participantContextKey struct{}
 type handshakeTimerContextKey struct{}
 type publicKeyContextKey struct{}
+type joinerContextKey struct{}
+type connectionContextKey struct{}
 
 type authWindow struct {
 	started  time.Time
 	failures int
 }
 
-// newSSHServer builds a key-authenticated server with only strict session channels.
-func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, error) {
+// newSSHServer builds strict participant and invite-only sessions, using port in join's client output.
+func newSSHServer(store *mailbox.Store, dataDir string, port int) (*gliderssh.Server, error) {
 	signer, err := hostSigner(dataDir)
 	if err != nil {
 		return nil, err
@@ -42,29 +46,37 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 	var mu sync.Mutex
 	failures := make(map[string]authWindow)
 	sessions := make(map[string]int)
+	// Record rejected keys and tokens in the same per-IP authentication window.
+	recordFailure := func(address net.Addr) {
+		ip, _, err := net.SplitHostPort(address.String())
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		window := failures[ip]
+		now := time.Now()
+		if window.started.IsZero() || now.Sub(window.started) >= time.Minute {
+			window = authWindow{started: now}
+		}
+		window.failures++
+		failures[ip] = window
+	}
 	server := &gliderssh.Server{HostSigners: []gliderssh.Signer{signer}}
 	server.ServerConfigCallback = func(ctx gliderssh.Context) *ssh.ServerConfig {
 		return &ssh.ServerConfig{AuthLogCallback: func(metadata ssh.ConnMetadata, method string, err error) {
 			if method == "publickey" && err == nil {
 				ctx.Value(handshakeTimerContextKey{}).(*time.Timer).Stop()
+				if joiner, _ := ctx.Value(joinerContextKey{}).(bool); joiner {
+					conn := ctx.Value(connectionContextKey{}).(net.Conn)
+					time.AfterFunc(joinTimeout, func() { _ = conn.Close() })
+				}
 				return
 			}
 			if err == nil || method == "none" {
 				return
 			}
-			ip, _, splitErr := net.SplitHostPort(metadata.RemoteAddr().String())
-			if splitErr != nil {
-				return
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			window := failures[ip]
-			now := time.Now()
-			if window.started.IsZero() || now.Sub(window.started) >= time.Minute {
-				window = authWindow{started: now}
-			}
-			window.failures++
-			failures[ip] = window
+			recordFailure(metadata.RemoteAddr())
 		}}
 	}
 	server.PublicKeyHandler = func(ctx gliderssh.Context, key gliderssh.PublicKey) bool {
@@ -89,19 +101,30 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 		}
 		publicKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
 		name, ok, err := store.ParticipantByKey(publicKey)
-		if !validSSHKey(key) || err != nil || !ok {
+		if !validSSHKey(key) || err != nil {
 			return false
+		}
+		if !ok {
+			pending, err := store.HasPendingInvites(now)
+			if err != nil || !pending {
+				return false
+			}
+			name = ""
 		}
 		ctx.SetValue(participantContextKey{}, name)
 		ctx.SetValue(publicKeyContextKey{}, publicKey)
+		ctx.SetValue(joinerContextKey{}, !ok)
 		return true
 	}
-	server.ChannelHandlers = map[string]gliderssh.ChannelHandler{"session": func(_ *gliderssh.Server, _ *ssh.ServerConn, incoming ssh.NewChannel, ctx gliderssh.Context) {
+	server.ChannelHandlers = map[string]gliderssh.ChannelHandler{"session": func(_ *gliderssh.Server, conn *ssh.ServerConn, incoming ssh.NewChannel, ctx gliderssh.Context) {
 		name, _ := ctx.Value(participantContextKey{}).(string)
 		publicKey, _ := ctx.Value(publicKeyContextKey{}).(string)
-		if err := stillRegistered(store, name, publicKey); err != nil {
-			_ = incoming.Reject(ssh.Prohibited, err.Error())
-			return
+		joiner, _ := ctx.Value(joinerContextKey{}).(bool)
+		if !joiner {
+			if err := stillRegistered(store, name, publicKey); err != nil {
+				_ = incoming.Reject(ssh.Prohibited, err.Error())
+				return
+			}
 		}
 		mu.Lock()
 		if sessions[name] >= sessionsPerParticipant {
@@ -150,11 +173,41 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 				}
 				if request.Type != "exec" || started {
 					_ = request.Reply(false, nil)
-					refuseChannel(channel, "only an mcp or wait exec request is allowed")
+					refuseChannel(channel, "only an mcp, wait or join exec request is allowed")
 					return
 				}
 				var command struct{ Command string }
-				if ssh.Unmarshal(request.Payload, &command) != nil || (command.Command != "mcp" && command.Command != "wait") {
+				if ssh.Unmarshal(request.Payload, &command) != nil {
+					_ = request.Reply(true, nil)
+					refuseChannel(channel, "invalid exec request")
+					return
+				}
+				args := strings.Fields(command.Command)
+				if joiner && len(args) == 2 && args[0] == "join" {
+					defer conn.Close()
+					_ = request.Reply(true, nil)
+					hash := sha256.Sum256([]byte(args[1]))
+					name, host, err := store.Join(fmt.Sprintf("%x", hash), publicKey, time.Now())
+					if err != nil {
+						recordFailure(ctx.RemoteAddr())
+						refuseChannel(channel, err.Error())
+						_ = channel.Close()
+						return
+					}
+					if err := json.NewEncoder(channel).Encode(map[string]any{"name": name, "client": admin.ClientCommands(host, port, signer.PublicKey())}); err != nil {
+						refuseChannel(channel, "join output failed")
+					} else {
+						exitChannel(channel, 0)
+					}
+					_ = channel.Close()
+					return
+				}
+				if joiner {
+					_ = request.Reply(true, nil)
+					refuseChannel(channel, "this key is not registered: only join <token> is allowed")
+					return
+				}
+				if command.Command != "mcp" && command.Command != "wait" {
 					_ = request.Reply(true, nil)
 					refuseChannel(channel, "unknown command: only mcp and wait are supported")
 					return
@@ -187,6 +240,7 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 	}
 	// Start one keepalive loop per authenticated connection, regardless of channel count.
 	server.ConnCallback = func(ctx gliderssh.Context, conn net.Conn) net.Conn {
+		ctx.SetValue(connectionContextKey{}, conn)
 		// A deadline would not work: gliderlabs resets it on every read and write.
 		ctx.SetValue(handshakeTimerContextKey{}, time.AfterFunc(handshakeTimeout, func() { _ = conn.Close() }))
 		go func() {
@@ -198,7 +252,7 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 					return
 				case <-ticker.C:
 					// A connection whose key was removed or replaced is closed, freeing its session slots.
-					if name, ok := ctx.Value(participantContextKey{}).(string); ok {
+					if name, ok := ctx.Value(participantContextKey{}).(string); ok && name != "" {
 						if stillRegistered(store, name, ctx.Value(publicKeyContextKey{}).(string)) != nil {
 							_ = conn.Close()
 							return

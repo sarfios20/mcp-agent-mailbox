@@ -21,7 +21,7 @@ func main() {
 // run validates subcommand arguments and returns the CLI exit status.
 func run(args []string) int {
 	usage := func() int {
-		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve [--data DIR] [--port N] | install [--port N] | add <name> --pubkey <file|-> --host <ssh-host> [--data DIR] | remove <name> [--data DIR] | doctor | backup [--data DIR] | uninstall", "detail": nil})
+		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve [--data DIR] [--port N] | install [--port N] | add <name> --pubkey <file|-> --host <ssh-host> [--data DIR] | invite <name> --host <ssh-host> [--data DIR] | remove <name> [--data DIR] | doctor | backup [--data DIR] | uninstall", "detail": nil})
 		return 2
 	}
 	if len(args) == 0 {
@@ -68,6 +68,18 @@ func run(args []string) int {
 			return usage()
 		}
 		result, err = admin.Add(name, *pubkey, *host, *data)
+	case "invite":
+		if len(args) < 2 {
+			return usage()
+		}
+		flags := flag.NewFlagSet("invite", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		host := flags.String("host", "", "SSH host")
+		data := flags.String("data", defaultDataDir, "data directory")
+		if flags.Parse(args[2:]) != nil || flags.NArg() != 0 || *host == "" {
+			return usage()
+		}
+		result, err = admin.Invite(args[1], *host, *data)
 	case "remove":
 		if len(args) < 2 {
 			return usage()
@@ -134,7 +146,7 @@ func serve(dataDir string, port int) error {
 		return err
 	}
 	defer store.Close()
-	server, err := newSSHServer(store, dataDir)
+	server, err := newSSHServer(store, dataDir, port)
 	if err != nil {
 		return err
 	}

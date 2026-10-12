@@ -23,6 +23,10 @@ const (
 	BackupMonthlyCount = 12
 	// BackupYearlyCount retains the newest snapshot in each of the latest distinct years.
 	BackupYearlyCount = 1
+	// InviteTTL is the validity period of a one-time invite.
+	InviteTTL = 24 * time.Hour
+	// InviteTokenBytes sets the random token size for invites.
+	InviteTokenBytes = 32
 	// ParticipantNamePattern restricts participant names.
 	ParticipantNamePattern = `^[a-z][a-z0-9-]{0,31}$`
 	// SystemUser owns the mailbox data and runs the server.

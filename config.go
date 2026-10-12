@@ -13,6 +13,8 @@ const (
 	sessionsPerParticipant = 8
 	// handshakeTimeout bounds SSH negotiation before authentication succeeds.
 	handshakeTimeout = 10 * time.Second
+	// joinTimeout closes unregistered connections this long after authentication, even after joining.
+	joinTimeout = 30 * time.Second
 	// keepaliveInterval sets the interval between SSH server keepalive requests.
 	keepaliveInterval = 30 * time.Second
 	// keepaliveTimeout closes a connection whose peer does not answer a keepalive in time.

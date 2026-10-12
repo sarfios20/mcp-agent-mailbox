@@ -77,6 +77,12 @@ CREATE TABLE IF NOT EXISTS participants (
  public_key TEXT NOT NULL UNIQUE,
  added_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS invites (
+ token_hash TEXT PRIMARY KEY,
+ name TEXT NOT NULL UNIQUE,
+ host TEXT NOT NULL,
+ expires_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS threads (
     id INTEGER PRIMARY KEY,
     subject TEXT,
@@ -168,17 +174,95 @@ func (s *Store) AddParticipant(name, publicKey string) error {
 	return tx.Commit()
 }
 
-// RemoveParticipant revokes a registration without deleting its thread history.
+// CreateInvite replaces a name's invite and prunes expired invites, unless the name is registered.
+func (s *Store) CreateInvite(name, host, tokenHash string, now, expiresAt time.Time) error {
+	if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`).MatchString(name) {
+		return fmt.Errorf("invalid participant name %q", name)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists bool
+	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM participants WHERE name = ?)", name).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("participant %q is already registered", name)
+	}
+	if _, err := tx.Exec("DELETE FROM invites WHERE expires_at <= ? OR name = ?", now.UTC().Format(timeLayout), name); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("INSERT INTO invites(token_hash, name, host, expires_at) VALUES (?, ?, ?, ?)", tokenHash, name, host, expiresAt.UTC().Format(timeLayout)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// HasPendingInvites reports whether an unexpired invite permits unregistered key authentication.
+func (s *Store) HasPendingInvites(now time.Time) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM invites WHERE expires_at > ?)", now.UTC().Format(timeLayout)).Scan(&exists)
+	return exists, err
+}
+
+// Join consumes an unexpired invite and registers its name and the new key atomically.
+func (s *Store) Join(tokenHash, publicKey string, now time.Time) (name, host string, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback()
+	err = tx.QueryRow("SELECT name, host FROM invites WHERE token_hash = ? AND expires_at > ?", tokenHash, now.UTC().Format(timeLayout)).Scan(&name, &host)
+	if err == sql.ErrNoRows {
+		return "", "", fmt.Errorf("invalid or expired invite")
+	}
+	if err != nil {
+		return "", "", err
+	}
+	var exists bool
+	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM participants WHERE name = ? OR public_key = ?)", name, publicKey).Scan(&exists); err != nil {
+		return "", "", err
+	}
+	if exists {
+		return "", "", fmt.Errorf("invite name or public key is already registered")
+	}
+	if _, err := tx.Exec("INSERT INTO participants(name, public_key, added_at) VALUES (?, ?, ?)", name, publicKey, now.UTC().Format(timeLayout)); err != nil {
+		return "", "", err
+	}
+	if _, err := tx.Exec("DELETE FROM invites WHERE token_hash = ?", tokenHash); err != nil {
+		return "", "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", "", err
+	}
+	return name, host, nil
+}
+
+// RemoveParticipant revokes a registration and any invite, preserving thread history.
 func (s *Store) RemoveParticipant(name string) (bool, error) {
 	if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`).MatchString(name) {
 		return false, fmt.Errorf("invalid participant name %q", name)
 	}
-	result, err := s.db.Exec("DELETE FROM participants WHERE name = ?", name)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return false, err
 	}
-	n, err := result.RowsAffected()
-	return n != 0, err
+	defer tx.Rollback()
+	removed := false
+	for _, table := range []string{"participants", "invites"} {
+		result, err := tx.Exec("DELETE FROM "+table+" WHERE name = ?", name)
+		if err != nil {
+			return false, err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		removed = removed || n != 0
+	}
+	return removed, tx.Commit()
 }
 
 // ParticipantByKey looks up the current owner of a normalized public key.

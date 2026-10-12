@@ -101,7 +101,7 @@ func startSSHTestServer(t *testing.T) (string, map[string]ssh.Signer, *mailbox.S
 			t.Fatal(err)
 		}
 	}
-	server, err := newSSHServer(store, dataDir)
+	server, err := newSSHServer(store, dataDir, defaultPort)
 	if err != nil {
 		t.Fatal(err)
 	}

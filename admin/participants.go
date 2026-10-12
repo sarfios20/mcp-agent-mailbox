@@ -3,7 +3,10 @@ package admin
 import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sarfios20/mcp-agent-mailbox/mailbox"
 	"golang.org/x/crypto/ssh"
@@ -52,40 +56,14 @@ func Add(name, pubkey, host, dataDir string) (any, error) {
 	if err := validateName(name); err != nil {
 		return nil, err
 	}
-	if !regexp.MustCompile(`^[a-zA-Z0-9_.:-]+$`).MatchString(host) || strings.HasPrefix(host, "-") {
-		return nil, fmt.Errorf("invalid SSH host %q", host)
+	if err := validateHost(host); err != nil {
+		return nil, err
 	}
 	key, err := readPublicKey(pubkey)
 	if err != nil {
 		return nil, err
 	}
-	if err := BecomeDataOwner(dataDir); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, errors.New("server never started: run install or serve first")
-		}
-		return nil, err
-	}
-	var config struct {
-		Port int `json:"port"`
-	}
-	data, err := os.ReadFile(filepath.Join(dataDir, "server.json"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, errors.New("server never started: run install or serve first")
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, err
-	}
-	if config.Port < 1 || config.Port > 65535 {
-		return nil, fmt.Errorf("invalid server port %d", config.Port)
-	}
-	privateKey, err := os.ReadFile(filepath.Join(dataDir, "host_ed25519_key"))
-	if err != nil {
-		return nil, err
-	}
-	signer, err := ssh.ParsePrivateKey(privateKey)
+	port, hostKey, err := clientServer(dataDir)
 	if err != nil {
 		return nil, err
 	}
@@ -97,21 +75,100 @@ func Add(name, pubkey, host, dataDir string) (any, error) {
 	if err := store.AddParticipant(name, key); err != nil {
 		return nil, err
 	}
-	args := []string{"-p", strconv.Itoa(config.Port), "-i", "~/.ssh/mcp-agent-mailbox", "-o", "IdentitiesOnly=yes", "mailbox@" + host, "mcp"}
-	tomlArgs, err := json.Marshal(args)
-	if err != nil {
-		return nil, err
-	}
-	command := fmt.Sprintf("ssh -p %d -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@%s", config.Port, host)
-	return map[string]any{"name": name, "client": map[string]string{
-		"known_hosts": fmt.Sprintf("[%s]:%d %s", host, config.Port, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))),
+	return map[string]any{"name": name, "client": ClientCommands(host, port, hostKey)}, nil
+}
+
+// ClientCommands formats the four client setup strings for a server and its host key.
+func ClientCommands(host string, port int, hostKey ssh.PublicKey) map[string]string {
+	args := []string{"-p", strconv.Itoa(port), "-i", "~/.ssh/mcp-agent-mailbox", "-o", "IdentitiesOnly=yes", "mailbox@" + host, "mcp"}
+	tomlArgs, _ := json.Marshal(args)
+	command := fmt.Sprintf("ssh -p %d -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@%s", port, host)
+	return map[string]string{
+		"known_hosts": fmt.Sprintf("[%s]:%d %s", host, port, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(hostKey)))),
 		"claude_code": "claude mcp add --scope user mailbox -- " + command + " mcp",
 		"codex_toml":  "[mcp_servers.mailbox]\ncommand = \"ssh\"\nargs = " + string(tomlArgs) + "\n",
 		"wait":        command + " wait",
+	}
+}
+
+// Invite creates a one-time token and returns the SSH command to redeem it.
+func Invite(name, host, dataDir string) (any, error) {
+	if err := validateName(name); err != nil {
+		return nil, err
+	}
+	if err := validateHost(host); err != nil {
+		return nil, err
+	}
+	port, hostKey, err := clientServer(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	tokenBytes := make([]byte, InviteTokenBytes)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, err
+	}
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	hash := sha256.Sum256([]byte(token))
+	now := time.Now().UTC()
+	expiresAt := now.Add(InviteTTL)
+	store, err := mailbox.Open(filepath.Join(dataDir, "mailbox.db"))
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	if err := store.CreateInvite(name, host, fmt.Sprintf("%x", hash), now, expiresAt); err != nil {
+		return nil, err
+	}
+	return map[string]any{"name": name, "expires_at": expiresAt.Format(time.RFC3339), "client": map[string]string{
+		"known_hosts": ClientCommands(host, port, hostKey)["known_hosts"],
+		"join":        fmt.Sprintf("ssh -p %d -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@%s join %s", port, host, token),
 	}}, nil
 }
 
-// Remove revokes only the participant registration, preserving all mailbox history.
+// clientServer drops to the data owner and reads the running server's port and host key.
+func clientServer(dataDir string) (int, ssh.PublicKey, error) {
+	if err := BecomeDataOwner(dataDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil, errors.New("server never started: run install or serve first")
+		}
+		return 0, nil, err
+	}
+	var config struct {
+		Port int `json:"port"`
+	}
+	data, err := os.ReadFile(filepath.Join(dataDir, "server.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil, errors.New("server never started: run install or serve first")
+	}
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return 0, nil, err
+	}
+	if config.Port < 1 || config.Port > 65535 {
+		return 0, nil, fmt.Errorf("invalid server port %d", config.Port)
+	}
+	privateKey, err := os.ReadFile(filepath.Join(dataDir, "host_ed25519_key"))
+	if err != nil {
+		return 0, nil, err
+	}
+	signer, err := ssh.ParsePrivateKey(privateKey)
+	if err != nil {
+		return 0, nil, err
+	}
+	return config.Port, signer.PublicKey(), nil
+}
+
+// validateHost restricts hosts to values that can be embedded in SSH commands.
+func validateHost(host string) error {
+	if !regexp.MustCompile(`^[a-zA-Z0-9_.:-]+$`).MatchString(host) || strings.HasPrefix(host, "-") {
+		return fmt.Errorf("invalid SSH host %q", host)
+	}
+	return nil
+}
+
+// Remove revokes the participant registration and any invite, preserving mailbox history.
 func Remove(name, dataDir string) (any, error) {
 	if err := validateName(name); err != nil {
 		return nil, err
