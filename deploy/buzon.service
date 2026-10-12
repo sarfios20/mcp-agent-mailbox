@@ -1,0 +1,33 @@
+[Unit]
+Description=Buzón MCP entre agentes
+After=network.target
+
+[Service]
+User=buzon
+Group=buzon
+ExecStart=/usr/local/bin/buzon
+Environment=BUZON_DB=/var/lib/buzon/buzon.db
+Environment=BUZON_ADDR=127.0.0.1:8765
+LoadCredential=tokens.json:/etc/buzon/tokens.json
+Environment=BUZON_TOKENS_FILE=%d/tokens.json
+StateDirectory=buzon
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryMax=128M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

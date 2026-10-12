@@ -1,0 +1,19 @@
+[Unit]
+Description=Verified backup of the coordinated-agent mailbox
+After=buzon.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/buzon-backup
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+ReadOnlyPaths=/var/lib/buzon
+ReadWritePaths=/var/backups/buzon /run/lock

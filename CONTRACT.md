@@ -6,7 +6,8 @@ server, already working, published here without history and in English.
 ## Language
 
 English everywhere: code, comments, errors, MCP tool descriptions, docs and
-client files. Nothing in the repo names a real person, host, IP or email.
+client files. Nothing in the repo names a real person, host, IP or email,
+except the copyright line in `LICENSE`.
 
 ## Stack
 
@@ -110,7 +111,7 @@ linux amd64 and arm64 plus `SHA256SUMS` attached to a GitHub Release.
 
 | # | Files | Verification | Who |
 |---|---|---|---|
-| 1 | Clean copy of the private repo, `LICENSE` | `grep -rniE '<private names>'` finds nothing, `go test ./...` | me |
+| 1 | Clean copy of the private repo, `LICENSE` | `grep -rniE --exclude=LICENSE --exclude=CONTRACT.md --exclude-dir=.git '<private names>' .` finds nothing, `go test ./...` | me |
 | 2 | `*.go`, `mailbox/`, `go.mod` | `go test ./...` green; no Spanish left in `*.go` | codex |
 | 3 | `admin/`, `main.go`, `config.go` | `test/e2e.sh`: clean Debian in a systemd container, `install`, two `add`, A sends and B reads through tunnels, 401 without token, `doctor` all pass | codex |
 | 4 | `install.sh`, `.github/workflows/` | tag on a fork produces the Release; `install.sh` installs it in the e2e container | codex |
