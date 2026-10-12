@@ -149,6 +149,14 @@ call $TUNNEL_B "$TB" inbox '{}' | sc | jq -e '.threads[] | select(.thread_id == 
 call $TUNNEL_A "$TA" send '{"to":["*"],"subject":"all","text":"hello all"}' | sc | jq -e '.thread_id == 3' >/dev/null || fail "send to * failed"
 call $TUNNEL_C "$TC" read_thread '{"thread_id":3}' | sc | jq -e '.thread.participants | sort == ["alice","bob","carol"]' >/dev/null || fail "* did not reach everyone"
 
+# add_to_thread: carol joins thread 1 late.
+call $TUNNEL_C "$TC" add_to_thread '{"thread_id":1,"names":["carol"]}' | iserr || fail "non-member added someone"
+call $TUNNEL_A "$TA" add_to_thread '{"thread_id":1,"names":["carol"]}' | sc | jq -e . >/dev/null || fail "alice could not add carol"
+call $TUNNEL_A "$TA" add_to_thread '{"thread_id":1,"names":["carol"]}' | iserr || fail "adding an existing member accepted"
+call $TUNNEL_C "$TC" read_thread '{"thread_id":1}' | sc | jq -e '.thread.messages[0] | .content == "hello bob" and .unread == false' >/dev/null || fail "late member does not see history as read"
+call $TUNNEL_A "$TA" reply '{"thread_id":1,"text":"welcome carol"}' >/dev/null
+call $TUNNEL_C "$TC" inbox '{}' | sc | jq -e '.threads[] | select(.thread_id == 1) | .unread == 1' >/dev/null || fail "late member does not get new messages"
+
 call $TUNNEL_A "$TA" send '{"to":[],"subject":"x","text":"x"}' | iserr || fail "empty to accepted"
 call $TUNNEL_A "$TA" send '{"to":["bob","bob"],"subject":"x","text":"x"}' | iserr || fail "duplicate to accepted"
 call $TUNNEL_A "$TA" send '{"to":["alice"],"subject":"x","text":"x"}' | iserr || fail "sending to yourself accepted"
