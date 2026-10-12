@@ -76,8 +76,12 @@ failure prints `{"error": "...", "detail": ...}` on stderr. Exit 0 ok, 1 failed,
   `ssh_config`, `tunnel_systemd`, `tunnel_launchd`, `tunnel_windows`,
   `claude_code`, `codex_toml`.
 - `remove <name>`: deletes the token and the Unix user. Keeps messages.
-- `doctor`: list of checks with pass/fail: service active, listening on
-  loopback only, 401 without token, sshd drop-in valid, last backup age.
+- `doctor`: prints `{"ok": bool, "checks": [{"name", "pass", "detail"}]}` on
+  stdout and exits 1 if any check fails (the one exception to the error
+  convention). Checks: service active, listening on loopback only, 401
+  without token, sshd drop-in present and `sshd -t` valid, backup timer
+  active, last backup younger than 48 h (or none yet and installed less than
+  48 h ago).
 - `backup`: Go port of `buzon-backup.py`, same retention (3 days, 2 weeks,
   12 months, 1 year), never deletes unverified files.
 - `uninstall`: stops and removes units, tunnel users, group `mailbox-tunnel`

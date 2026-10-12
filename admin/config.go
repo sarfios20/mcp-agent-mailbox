@@ -1,6 +1,8 @@
 // Package admin installs and removes the system service and SSH tunnel configuration.
 package admin
 
+import "time"
+
 // Installation settings are kept together; templates receive these same values.
 const (
 	// DefaultPort is the loopback TCP port used when install has no --port argument.
@@ -39,4 +41,8 @@ const (
 	BackupServiceName = "mcp-agent-mailbox-backup.service"
 	// BackupTimerName is the daily backup timer.
 	BackupTimerName = "mcp-agent-mailbox-backup.timer"
+	// DoctorBackupMaxAge limits backup age and the grace period after installation.
+	DoctorBackupMaxAge = 48 * time.Hour
+	// DoctorHTTPTimeout bounds the unauthenticated local MCP probe.
+	DoctorHTTPTimeout = 3 * time.Second
 )

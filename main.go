@@ -224,7 +224,7 @@ func main() {
 // run validates subcommand arguments and returns the CLI exit status.
 func run(args []string) int {
 	usage := func() int {
-		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve | install [--port N] | add <name> --pubkey <file|-> --host <ssh-host> | remove <name> | uninstall"})
+		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve | install [--port N] | add <name> --pubkey <file|-> --host <ssh-host> | remove <name> | doctor | uninstall"})
 		return 2
 	}
 	if len(args) == 0 {
@@ -232,6 +232,7 @@ func run(args []string) int {
 	}
 	var result any
 	var err error
+	exitCode := 0
 	switch args[0] {
 	case "serve":
 		if len(args) != 1 {
@@ -268,6 +269,16 @@ func run(args []string) int {
 			return usage()
 		}
 		result, err = admin.Remove(args[1])
+	case "doctor":
+		if len(args) != 1 {
+			return usage()
+		}
+		var diagnosis admin.DoctorResult
+		diagnosis, err = admin.Doctor()
+		result = diagnosis
+		if !diagnosis.OK {
+			exitCode = 1
+		}
 	case "uninstall":
 		if len(args) != 1 {
 			return usage()
@@ -281,7 +292,7 @@ func run(args []string) int {
 		return 1
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(result)
-	return 0
+	return exitCode
 }
 
 // serve opens the mailbox and serves the authenticated MCP endpoint.
