@@ -187,7 +187,11 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 					return
 				case <-ticker.C:
 					if authenticated, ok := ctx.Value(gliderssh.ContextKeyConn).(*ssh.ServerConn); ok {
-						if _, _, err := authenticated.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+						// SendRequest waits for the reply with no limit of its own.
+						unanswered := time.AfterFunc(keepaliveTimeout, func() { _ = conn.Close() })
+						_, _, err := authenticated.SendRequest("keepalive@openssh.com", true, nil)
+						unanswered.Stop()
+						if err != nil {
 							_ = conn.Close()
 							return
 						}

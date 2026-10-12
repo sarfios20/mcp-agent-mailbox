@@ -15,4 +15,6 @@ const (
 	handshakeTimeout = 10 * time.Second
 	// keepaliveInterval sets the interval between SSH server keepalive requests.
 	keepaliveInterval = 30 * time.Second
+	// keepaliveTimeout closes a connection whose peer does not answer a keepalive in time.
+	keepaliveTimeout = 15 * time.Second
 )
