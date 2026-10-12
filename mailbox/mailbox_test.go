@@ -157,6 +157,40 @@ func TestGroupReplyReceipts(t *testing.T) {
 	}
 }
 
+// Catches a late member seeing old messages as unread or missing unread receipts for new ones.
+func TestAddToThreadLateMemberReceipts(t *testing.T) {
+	store := openTestStore(t)
+	threadID, err := store.Send("alice", []string{"bob"}, "status", "hello bob")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	participants, err := store.AddToThread("alice", threadID, []string{"carol"})
+	if err != nil {
+		t.Fatalf("AddToThread: %v", err)
+	}
+	if len(participants) != 3 || participants[0] != "alice" || participants[1] != "bob" || participants[2] != "carol" {
+		t.Fatalf("participants = %q, want [alice bob carol]", participants)
+	}
+	thread, err := store.ReadThread("carol", threadID)
+	if err != nil {
+		t.Fatalf("ReadThread(carol): %v", err)
+	}
+	if len(thread.Messages) != 1 || thread.Messages[0].Content != "hello bob" || thread.Messages[0].Unread {
+		t.Fatalf("old messages = %+v, want the old message with Unread false", thread.Messages)
+	}
+	messageID, err := store.Reply("alice", threadID, "welcome carol")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	thread, err = store.ReadThread("carol", threadID)
+	if err != nil {
+		t.Fatalf("ReadThread(carol) after reply: %v", err)
+	}
+	if len(thread.Messages) != 2 || thread.Messages[1].ID != messageID || !thread.Messages[1].Unread {
+		t.Fatalf("messages after reply = %+v, want the new reply unread", thread.Messages)
+	}
+}
+
 // Catches one member reading a group thread clearing another member's unread receipts.
 func TestGroupReadPreservesOtherMembersUnread(t *testing.T) {
 	store := openTestStore(t)

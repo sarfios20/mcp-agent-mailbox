@@ -38,6 +38,15 @@ type replyInput struct {
 	Text     string `json:"text" jsonschema:"Reply text"`
 }
 
+type addToThreadInput struct {
+	ThreadID int64    `json:"thread_id" jsonschema:"ID of the thread to add participants to"`
+	Names    []string `json:"names" jsonschema:"Participant names to add; wildcard is not supported"`
+}
+
+type addToThreadOutput struct {
+	Participants []string `json:"participants" jsonschema:"All thread participant names after adding, sorted"`
+}
+
 type sendInput struct {
 	To      []string `json:"to" jsonschema:"Recipient participant names or [\"*\"] for every other current participant"`
 	Subject string   `json:"subject" jsonschema:"Subject of the new thread"`
@@ -156,6 +165,21 @@ func newHandler(store *mailbox.Store, tokens map[string]string) http.Handler {
 			return nil, sendOutput{}, err
 		}
 		return nil, sendOutput{ThreadID: threadID}, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "add_to_thread",
+		Description: "Adds named participants to a thread the authenticated participant belongs to and returns all thread participants sorted. New members see the whole history as read and receive unread receipts for future messages. Wildcard names and existing members are rejected.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input addToThreadInput) (*mcp.CallToolResult, addToThreadOutput, error) {
+		me, err := authenticatedName(req)
+		if err != nil {
+			return nil, addToThreadOutput{}, err
+		}
+		participants, err := store.AddToThread(me, input.ThreadID, input.Names)
+		if err != nil {
+			return nil, addToThreadOutput{}, err
+		}
+		return nil, addToThreadOutput{Participants: participants}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{

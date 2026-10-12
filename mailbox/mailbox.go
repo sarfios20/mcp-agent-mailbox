@@ -218,6 +218,59 @@ func (s *Store) Reply(me string, threadID int64, text string) (messageID int64, 
 	return messageID, nil
 }
 
+// AddToThread lets a member add named participants and returns all members sorted.
+// New members see the history but receive receipts only for future messages.
+func (s *Store) AddToThread(me string, threadID int64, names []string) ([]string, error) {
+	if err := s.validateParticipant(me); err != nil {
+		return nil, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin adding participants to thread %d as %q: %w", threadID, me, err)
+	}
+	defer tx.Rollback()
+	members, err := threadParticipants(tx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireMember(me, threadID, members); err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("participants %q are empty for thread %d", names, threadID)
+	}
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name == "*" {
+			return nil, fmt.Errorf("participant %q is not supported when adding to thread %d", name, threadID)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, fmt.Errorf("participant %q is duplicated", name)
+		}
+		seen[name] = struct{}{}
+		if err := s.validateParticipant(name); err != nil {
+			return nil, err
+		}
+		for _, member := range members {
+			if name == member {
+				return nil, fmt.Errorf("participant %q already belongs to thread %d", name, threadID)
+			}
+		}
+	}
+	now := time.Now().UTC().Format(timeLayout)
+	for _, name := range names {
+		if _, err := tx.Exec("INSERT INTO thread_members(thread_id, participant, added_at) VALUES (?, ?, ?)", threadID, name, now); err != nil {
+			return nil, fmt.Errorf("add participant %q to thread %d: %w", name, threadID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit adding participants to thread %d as %q: %w", threadID, me, err)
+	}
+	members = append(members, names...)
+	sort.Strings(members)
+	return members, nil
+}
+
 // insertMessage inserts a message and its recipients' receipts in the caller's transaction.
 func insertMessage(tx *sql.Tx, me string, threadID int64, text, now string) (int64, error) {
 	result, err := tx.Exec("INSERT INTO messages(thread_id, sender, content, created_at) VALUES (?, ?, ?, ?)", threadID, me, text, now)
