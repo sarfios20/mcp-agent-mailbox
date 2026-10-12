@@ -433,3 +433,15 @@ func copyExecutable() error {
 	}
 	return os.Rename(output.Name(), BinaryPath)
 }
+
+// deleteTunnelUser kills active sessions before deleting an existing tunnel account.
+func deleteTunnelUser(user string) error {
+	if _, err := command("pkill", "-KILL", "-u", user); err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			return err
+		}
+	}
+	_, err := command("userdel", user)
+	return err
+}

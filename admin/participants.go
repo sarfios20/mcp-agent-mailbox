@@ -1,33 +1,76 @@
 package admin
 
 import (
-	"bytes"
-	"crypto/rand"
-	"encoding/hex"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
-	"text/template"
+	"syscall"
+
+	"github.com/sarfios20/mcp-agent-mailbox/mailbox"
+	"golang.org/x/crypto/ssh"
 )
 
-// Add provisions a restricted tunnel account and returns its token and client configuration.
-// Repeating an existing name and key returns the same token without changing host state.
-func Add(name, pubkey, host string) (any, error) {
-	if err := requireRoot(); err != nil {
+// BecomeDataOwner switches root to the data directory's owner before opening SQLite.
+// Other callers must already own the directory; the identity change is permanent.
+func BecomeDataOwner(dataDir string) error {
+	info, err := os.Stat(dataDir)
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("cannot determine owner of data directory %q", dataDir)
+	}
+	uid, gid := int(stat.Uid), int(stat.Gid)
+	if os.Geteuid() != 0 {
+		if os.Geteuid() != uid {
+			return fmt.Errorf("current user uid %d is not data directory owner uid %d", os.Geteuid(), uid)
+		}
+		return nil
+	}
+	if err := syscall.Setgroups([]int{gid}); err != nil {
+		return err
+	}
+	if err := syscall.Setgid(gid); err != nil {
+		return err
+	}
+	return syscall.Setuid(uid)
+}
+
+// Add registers a public key and returns client commands for the running SSH server.
+// Repeating the same name and key leaves the registration unchanged.
+func Add(name, pubkey, host, dataDir string) (any, error) {
+	if err := validateName(name); err != nil {
+		return nil, err
+	}
+	if !regexp.MustCompile(`^[a-zA-Z0-9_.:-]+$`).MatchString(host) || strings.HasPrefix(host, "-") {
+		return nil, fmt.Errorf("invalid SSH host %q", host)
+	}
+	key, err := readPublicKey(pubkey)
+	if err != nil {
+		return nil, err
+	}
+	if err := BecomeDataOwner(dataDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, errors.New("server never started: run install or serve first")
+		}
 		return nil, err
 	}
 	var config struct {
 		Port int `json:"port"`
 	}
-	data, err := os.ReadFile(filepath.Join(ConfigDir, "config.json"))
+	data, err := os.ReadFile(filepath.Join(dataDir, "server.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, errors.New("not installed: run install first")
+		return nil, errors.New("server never started: run install or serve first")
 	}
 	if err != nil {
 		return nil, err
@@ -36,107 +79,59 @@ func Add(name, pubkey, host string) (any, error) {
 		return nil, err
 	}
 	if config.Port < 1 || config.Port > 65535 {
-		return nil, fmt.Errorf("invalid installed port %d", config.Port)
+		return nil, fmt.Errorf("invalid server port %d", config.Port)
 	}
-	if err := validateName(name); err != nil {
-		return nil, err
-	}
-	if strings.HasPrefix(host, "-") || strings.ContainsAny(host, " \t\r\n\x00") || host == "" {
-		return nil, fmt.Errorf("invalid SSH host %q", host)
-	}
-	key, err := readPublicKey(pubkey)
+	privateKey, err := os.ReadFile(filepath.Join(dataDir, "host_ed25519_key"))
 	if err != nil {
 		return nil, err
 	}
-	tokens, err := readTokens()
+	signer, err := ssh.ParsePrivateKey(privateKey)
 	if err != nil {
 		return nil, err
 	}
-	user := "mailbox-" + name
-	keyPath := filepath.Join(KeysDir, user)
-	keyLine := fmt.Sprintf("restrict,port-forwarding,permitopen=\"127.0.0.1:%d\" %s\n", config.Port, key)
-	if token, exists := tokens[name]; exists {
-		stored, err := os.ReadFile(keyPath)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		_, storedKey, _ := strings.Cut(strings.TrimSuffix(string(stored), "\n"), " ")
-		if storedKey != key {
-			return nil, fmt.Errorf("participant %s exists with a different key; remove it first", name)
-		}
-		return clientResult(name, token, host, config.Port)
-	}
-	random := make([]byte, TokenBytes)
-	if _, err := rand.Read(random); err != nil {
-		return nil, err
-	}
-	token := hex.EncodeToString(random)
-	result, err := clientResult(name, token, host, config.Port)
+	store, err := mailbox.Open(filepath.Join(dataDir, "mailbox.db"))
 	if err != nil {
 		return nil, err
 	}
-	if _, exists, err := lookup("passwd", user); err != nil {
-		return nil, err
-	} else if !exists {
-		if _, err := command("useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", "--gid", TunnelGroup, user); err != nil {
-			return nil, err
-		}
-	}
-	if err := writeFile(keyPath, []byte(keyLine), 0644); err != nil {
+	defer store.Close()
+	if err := store.AddParticipant(name, key); err != nil {
 		return nil, err
 	}
-	tokens[name] = token
-	if err := writeTokens(tokens); err != nil {
+	args := []string{"-p", strconv.Itoa(config.Port), "-i", "~/.ssh/mcp-agent-mailbox", "-o", "IdentitiesOnly=yes", "mailbox@" + host, "mcp"}
+	tomlArgs, err := json.Marshal(args)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := command("systemctl", "restart", ServiceName); err != nil {
-		return nil, err
-	}
-	return result, nil
+	command := fmt.Sprintf("ssh -p %d -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@%s", config.Port, host)
+	return map[string]any{"name": name, "client": map[string]string{
+		"known_hosts": fmt.Sprintf("[%s]:%d %s", host, config.Port, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))),
+		"claude_code": "claude mcp add --scope user mailbox -- " + command + " mcp",
+		"codex_toml":  "[mcp_servers.mailbox]\ncommand = \"ssh\"\nargs = " + string(tomlArgs) + "\n",
+		"wait":        command + " wait",
+	}}, nil
 }
 
-// Remove revokes a token and key and terminates the participant's existing SSH tunnels.
-// Removing an absent participant succeeds and reports removed=false.
-func Remove(name string) (any, error) {
-	if err := requireRoot(); err != nil {
-		return nil, err
-	}
+// Remove revokes only the participant registration, preserving all mailbox history.
+func Remove(name, dataDir string) (any, error) {
 	if err := validateName(name); err != nil {
 		return nil, err
 	}
-	tokens, err := readTokens()
+	if err := BecomeDataOwner(dataDir); err != nil {
+		return nil, err
+	}
+	store, err := mailbox.Open(filepath.Join(dataDir, "mailbox.db"))
 	if err != nil {
 		return nil, err
 	}
-	_, removed := tokens[name]
-	user := "mailbox-" + name
-	if _, exists, err := lookup("passwd", user); err != nil {
+	defer store.Close()
+	removed, err := store.RemoveParticipant(name)
+	if err != nil {
 		return nil, err
-	} else if exists {
-		if err := deleteTunnelUser(user); err != nil {
-			return nil, err
-		}
-		removed = true
-	}
-	keyPath := filepath.Join(KeysDir, user)
-	if err := os.Remove(keyPath); err == nil {
-		removed = true
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	if removed {
-		delete(tokens, name)
-		if err := writeTokens(tokens); err != nil {
-			return nil, err
-		}
-		if _, err := command("systemctl", "restart", ServiceName); err != nil {
-			return nil, err
-		}
 	}
 	return map[string]any{"removed": removed, "name": name}, nil
 }
 
-// validateName rejects participant names unsafe for Unix accounts and key paths.
+// validateName rejects participant names outside the mailbox name pattern.
 func validateName(name string) error {
 	if !regexp.MustCompile(ParticipantNamePattern).MatchString(name) {
 		return fmt.Errorf("invalid participant name %q", name)
@@ -144,7 +139,7 @@ func validateName(name string) error {
 	return nil
 }
 
-// readPublicKey accepts exactly one bare OpenSSH public key line, verified by ssh-keygen.
+// readPublicKey parses exactly one bare public key and drops its optional comment.
 func readPublicKey(path string) (string, error) {
 	var data []byte
 	var err error
@@ -156,87 +151,22 @@ func readPublicKey(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	key := strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
-	if strings.ContainsAny(key, "\r\n\x00") {
-		return "", errors.New("pubkey must contain exactly one OpenSSH public key line")
+	key, _, options, rest, err := ssh.ParseAuthorizedKey(data)
+	if err != nil || len(options) != 0 || len(strings.TrimSpace(string(rest))) != 0 {
+		return "", errors.New("pubkey must contain exactly one bare OpenSSH public key")
 	}
-	key = strings.TrimSpace(key)
-	fields := strings.Fields(key)
-	if len(fields) < 2 || !(strings.HasPrefix(fields[0], "ssh-") || strings.HasPrefix(fields[0], "ecdsa-") || strings.HasPrefix(fields[0], "sk-")) {
-		return "", errors.New("pubkey must contain exactly one OpenSSH public key line")
+	cryptoKey, ok := key.(ssh.CryptoPublicKey)
+	if !ok {
+		return "", errors.New("unsupported public key type")
 	}
-	file, err := os.CreateTemp("", ".mailbox-pubkey-*")
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(file.Name())
-	if _, err := file.WriteString(key + "\n"); err != nil {
-		file.Close()
-		return "", err
-	}
-	if err := file.Close(); err != nil {
-		return "", err
-	}
-	if _, err := command("ssh-keygen", "-l", "-f", file.Name()); err != nil {
-		return "", err
-	}
-	return key, nil
-}
-
-// readTokens reads the participant map, treating a missing file as an empty installation.
-func readTokens() (map[string]string, error) {
-	data, err := os.ReadFile(filepath.Join(ConfigDir, "tokens.json"))
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]string{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var tokens map[string]string
-	if err := json.Unmarshal(data, &tokens); err != nil {
-		return nil, err
-	}
-	if tokens == nil {
-		return nil, errors.New("tokens.json must be a JSON object")
-	}
-	return tokens, nil
-}
-
-// writeTokens atomically replaces tokens.json with root-only permissions.
-func writeTokens(tokens map[string]string) error {
-	data, err := json.Marshal(tokens)
-	if err != nil {
-		return err
-	}
-	return writeFile(filepath.Join(ConfigDir, "tokens.json"), append(data, '\n'), 0600)
-}
-
-// deleteTunnelUser kills active sessions before deleting an existing tunnel account.
-func deleteTunnelUser(user string) error {
-	if _, err := command("pkill", "-KILL", "-u", user); err != nil {
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
-			return err
+	switch public := cryptoKey.CryptoPublicKey().(type) {
+	case ed25519.PublicKey, *ecdsa.PublicKey:
+	case *rsa.PublicKey:
+		if public.N.BitLen() < 2048 {
+			return "", errors.New("RSA public key must have at least 2048 bits")
 		}
+	default:
+		return "", errors.New("public key must be ed25519, ecdsa or RSA with at least 2048 bits")
 	}
-	_, err := command("userdel", user)
-	return err
-}
-
-// clientResult renders ready-to-paste client strings from the embedded templates.
-func clientResult(name, token, host string, port int) (any, error) {
-	client := make(map[string]string)
-	settings := map[string]any{"Host": host, "User": "mailbox-" + name, "Port": port, "Token": token}
-	for _, name := range []string{"ssh_config", "tunnel_systemd", "tunnel_launchd", "tunnel_windows", "claude_code", "codex_toml"} {
-		t, err := template.ParseFS(units, "units/client/"+name)
-		if err != nil {
-			return nil, err
-		}
-		var rendered bytes.Buffer
-		if err := t.Execute(&rendered, settings); err != nil {
-			return nil, err
-		}
-		client[name] = rendered.String()
-	}
-	return map[string]any{"name": name, "token": token, "ssh_user": settings["User"], "client": client}, nil
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))), nil
 }

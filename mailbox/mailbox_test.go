@@ -7,10 +7,16 @@ import (
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := Open(filepath.Join(t.TempDir(), "mailbox.db"), []string{"alice", "bob", "carol"})
+	store, err := Open(filepath.Join(t.TempDir(), "mailbox.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	for _, name := range []string{"alice", "bob", "carol"} {
+		if err := store.AddParticipant(name, "key-"+name); err != nil {
+			t.Fatalf("AddParticipant: %v", err)
+		}
+	}
+
 	t.Cleanup(func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("Close: %v", err)

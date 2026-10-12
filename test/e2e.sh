@@ -133,8 +133,15 @@ vm 'sudo mcp-agent-mailbox add Bad_Name --pubkey - --host e2e-vps' < "$W/mallory
 mbx alice </dev/null >/dev/null 2>&1 && fail "session without command accepted"
 mbx alice ls </dev/null >/dev/null 2>&1 && fail "unknown command accepted"
 mbxssh alice -tt mailbox@127.0.0.1 mcp </dev/null >/dev/null 2>&1 && fail "pty accepted"
-mbxssh alice -N -o ExitOnForwardFailure=yes -L 18890:127.0.0.1:22 mailbox@127.0.0.1 </dev/null >/dev/null 2>&1 & fp=$!
-sleep 3; kill -0 $fp 2>/dev/null && { kill $fp; fail "port forwarding accepted"; }
+mbxssh alice -N -o ExitOnForwardFailure=yes -R 18891:127.0.0.1:22 mailbox@127.0.0.1 </dev/null >/dev/null 2>&1 & fp=$!
+sleep 3; kill -0 $fp 2>/dev/null && { kill $fp; fail "remote port forwarding accepted"; }
+# A local forward is only requested when something connects to it: connect and
+# check that the VM's own sshd banner never comes back.
+mbxssh alice -N -L 18890:127.0.0.1:22 mailbox@127.0.0.1 </dev/null >/dev/null 2>&1 & fp=$!; PIDS+=($fp)
+sleep 2
+banner=$(timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/18890 && head -c 4 <&3' 2>/dev/null || true)
+kill $fp 2>/dev/null || true
+[ "$banner" = "SSH-" ] && fail "local port forwarding accepted"
 
 # Thread 1: alice -> bob.
 call alice participants '{}' | sc | jq -e '.participants | sort == ["alice","bob","carol"]' >/dev/null || fail "participants is not alice, bob, carol"

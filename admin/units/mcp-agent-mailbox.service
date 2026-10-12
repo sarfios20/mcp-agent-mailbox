@@ -5,11 +5,7 @@ After=network.target
 [Service]
 User={{.SystemUser}}
 Group={{.SystemUser}}
-ExecStart={{.BinaryPath}} serve
-Environment=MAILBOX_DB={{.DataDir}}/mailbox.db
-Environment=MAILBOX_ADDR=127.0.0.1:{{.Port}}
-LoadCredential=tokens.json:{{.ConfigDir}}/tokens.json
-Environment=MAILBOX_TOKENS_FILE=%d/tokens.json
+ExecStart={{.BinaryPath}} serve --data {{.DataDir}} --port {{.Port}}
 StateDirectory=mcp-agent-mailbox
 StateDirectoryMode=0700
 Restart=on-failure
@@ -24,8 +20,6 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-IPAddressDeny=any
-IPAddressAllow=localhost
 MemoryMax=128M
 TasksMax=32
 

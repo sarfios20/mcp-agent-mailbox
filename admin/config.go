@@ -5,8 +5,8 @@ import "time"
 
 // Installation settings are kept together; templates receive these same values.
 const (
-	// DefaultPort is the loopback TCP port used when install has no --port argument.
-	DefaultPort = 8765
+	// DefaultPort is the SSH TCP port used when install has no --port argument.
+	DefaultPort = 2222
 	// BinaryPath is the installed static executable.
 	BinaryPath = "/usr/local/bin/mcp-agent-mailbox"
 	// ConfigDir holds root-only tokens and the installed port.

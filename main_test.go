@@ -2,93 +2,57 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"io"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sarfios20/mcp-agent-mailbox/mailbox"
+	"golang.org/x/crypto/ssh"
 )
 
-func TestRequestBodyLimit(t *testing.T) {
-	store := openHTTPTestStore(t)
-	server := httptest.NewServer(newHandler(store, testTokens))
-	t.Cleanup(server.Close)
-
-	request, err := http.NewRequest(
-		http.MethodPost,
-		server.URL+"/mcp",
-		strings.NewReader(strings.Repeat("x", int(maxRequestBodyBytes)+1)),
-	)
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer "+testTokens["ana"])
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, response.Body)
-	if response.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusRequestEntityTooLarge)
+// Catches authentication admitting a key absent from the participants table.
+func TestAuthenticationRejectsUnknownKey(t *testing.T) {
+	address, _, _ := startSSHTestServer(t)
+	_, err := ssh.Dial("tcp", address, sshTestConfig(testSigner(t)))
+	if err == nil {
+		t.Fatal("unknown key was accepted")
 	}
 }
 
-var testTokens = map[string]string{
-	"ana": "token-ana",
-	"bea": "token-bea",
-}
-
-// Catches the endpoint allowing access without a token or with an unknown token.
-func TestAuthenticationRejectsMissingAndUnknownTokens(t *testing.T) {
-	store := openHTTPTestStore(t)
-	server := httptest.NewServer(newHandler(store, testTokens))
-	t.Cleanup(server.Close)
-
-	for _, test := range []struct {
-		name  string
-		token string
-	}{
-		{name: "missing"},
-		{name: "unknown", token: "token-unknown"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			req, err := http.NewRequest(http.MethodPost, server.URL+"/mcp", nil)
+// Catches forbidden exec commands being accepted as MCP sessions.
+func TestRejectsCommandsOtherThanMCP(t *testing.T) {
+	address, keys, _ := startSSHTestServer(t)
+	client := dialSSHTestClient(t, address, keys["alice"])
+	for _, command := range []string{"ls", "wait", "mcp extra", ""} {
+		t.Run(command, func(t *testing.T) {
+			session, err := client.NewSession()
 			if err != nil {
-				t.Fatalf("NewRequest: %v", err)
+				t.Fatal(err)
 			}
-			if test.token != "" {
-				req.Header.Set("Authorization", "Bearer "+test.token)
+			defer session.Close()
+			output, err := session.CombinedOutput(command)
+			if err == nil {
+				t.Fatalf("command %q was accepted", command)
 			}
-			response, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("Do: %v", err)
-			}
-			defer response.Body.Close()
-			if response.StatusCode != http.StatusUnauthorized {
-				t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusUnauthorized)
+			if !strings.Contains(string(output), "only mcp") {
+				t.Fatalf("missing refusal reason: %q", output)
 			}
 		})
 	}
 }
 
-// Catches an injected sender field impersonating the bearer token identity.
+// Catches an injected sender field impersonating the SSH key's participant.
 func TestSendRejectsInjectedSender(t *testing.T) {
-	store := openHTTPTestStore(t)
-	server := httptest.NewServer(newHandler(store, testTokens))
-	t.Cleanup(server.Close)
-	ana := connectTestClient(t, server.URL+"/mcp", testTokens["ana"])
-
-	result, err := ana.CallTool(context.Background(), &mcp.CallToolParams{Name: "send", Arguments: map[string]any{
-		"to":      []string{"bea"},
-		"subject": "status",
-		"text":    "spoofed message",
-		"sender":  "bea",
+	address, keys, store := startSSHTestServer(t)
+	alice := connectTestClient(t, address, keys["alice"])
+	result, err := alice.CallTool(context.Background(), &mcp.CallToolParams{Name: "send", Arguments: map[string]any{
+		"to": []string{"bob"}, "subject": "status", "text": "spoofed message", "sender": "bob",
 	}})
 	if err != nil {
 		t.Fatalf("CallTool(send): %v", err)
@@ -96,76 +60,117 @@ func TestSendRejectsInjectedSender(t *testing.T) {
 	if !result.IsError {
 		t.Fatal("send with an injected sender field was accepted")
 	}
-	inbox, err := store.Inbox("bea")
+	inbox, err := store.Inbox("bob")
 	if err != nil {
-		t.Fatalf("Inbox: %v", err)
+		t.Fatal(err)
 	}
 	if len(inbox) != 0 {
-		t.Fatalf("rejected send left %d threads in the recipient inbox", len(inbox))
+		t.Fatal("rejected send left a thread in the recipient inbox")
 	}
 }
 
-// Catches the MCP HTTP transport preventing B from seeing A's message in inbox.
+// Catches the SSH MCP transport losing delivery or binding tools to the SSH user.
 func TestSendAppearsInRecipientsInbox(t *testing.T) {
-	store := openHTTPTestStore(t)
-	server := httptest.NewServer(newHandler(store, testTokens))
-	t.Cleanup(server.Close)
-	ana := connectTestClient(t, server.URL+"/mcp", testTokens["ana"])
-	bea := connectTestClient(t, server.URL+"/mcp", testTokens["bea"])
-
-	sent := callTool[sendOutput](t, ana, "send", map[string]any{
-		"to":      []string{"bea"},
-		"subject": "delivery",
-		"text":    "done",
-	})
-	inbox := callTool[inboxOutput](t, bea, "inbox", map[string]any{})
-	if got := len(inbox.Threads); got != 1 {
-		t.Fatalf("len(threads) = %d, want 1", got)
+	address, keys, _ := startSSHTestServer(t)
+	alice := connectTestClient(t, address, keys["alice"])
+	bob := connectTestClient(t, address, keys["bob"])
+	sent := callTool[sendOutput](t, alice, "send", map[string]any{"to": []string{"bob"}, "subject": "delivery", "text": "done"})
+	inbox := callTool[inboxOutput](t, bob, "inbox", map[string]any{})
+	if len(inbox.Threads) != 1 || inbox.Threads[0].ThreadID != sent.ThreadID {
+		t.Fatalf("unexpected inbox: %+v", inbox)
 	}
-	if got := inbox.Threads[0].ThreadID; got != sent.ThreadID {
-		t.Fatalf("thread_id = %d, want %d", got, sent.ThreadID)
-	}
-	if got := inbox.Threads[0].Participants; len(got) != 2 || got[0] != "ana" || got[1] != "bea" {
-		t.Fatalf("participants = %q, want [ana bea]", got)
+	if got := inbox.Threads[0].Participants; len(got) != 2 || got[0] != "alice" || got[1] != "bob" {
+		t.Fatalf("participants = %q, want [alice bob]", got)
 	}
 }
 
-// openHTTPTestStore opens an isolated mailbox that closes automatically when
-// the test using it finishes.
-func openHTTPTestStore(t *testing.T) *mailbox.Store {
+// startSSHTestServer serves real SSH connections against an isolated mailbox.
+func startSSHTestServer(t *testing.T) (string, map[string]ssh.Signer, *mailbox.Store) {
 	t.Helper()
-	store, err := mailbox.Open(filepath.Join(t.TempDir(), "mailbox.db"), []string{"ana", "bea"})
+	dataDir := t.TempDir()
+	store, err := mailbox.Open(filepath.Join(dataDir, "mailbox.db"))
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Errorf("Close: %v", err)
+	t.Cleanup(func() { _ = store.Close() })
+	keys := make(map[string]ssh.Signer)
+	for _, name := range []string{"alice", "bob"} {
+		keys[name] = testSigner(t)
+		if err := store.AddParticipant(name, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(keys[name].PublicKey())))); err != nil {
+			t.Fatal(err)
 		}
-	})
-	return store
+	}
+	server, err := newSSHServer(store, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close(); <-done })
+	return listener.Addr().String(), keys, store
 }
 
-// connectTestClient connects an authenticated MCP client and registers its cleanup
-// so each test uses only real HTTP traffic against httptest.
-func connectTestClient(t *testing.T, endpoint, token string) *mcp.ClientSession {
+// testSigner creates a distinct authentication key for each test participant.
+func testSigner(t *testing.T) ssh.Signer {
 	t.Helper()
-	httpClient := &http.Client{Transport: bearerTransport{token: token}}
-	client := mcp.NewClient(&mcp.Implementation{Name: "mailbox-test", Version: "1.0.0"}, nil)
-	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
-		Endpoint:             endpoint,
-		HTTPClient:           httpClient,
-		MaxRetries:           -1,
-		DisableStandaloneSSE: true,
-	}, nil)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := session.Close(); err != nil {
-			t.Errorf("Close session: %v", err)
-		}
-	})
+	signer, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
+
+// sshTestConfig deliberately uses an unrelated username to test key-only identity.
+func sshTestConfig(key ssh.Signer) *ssh.ClientConfig {
+	return &ssh.ClientConfig{User: "ignored", Auth: []ssh.AuthMethod{ssh.PublicKeys(key)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: handshakeTimeout}
+}
+
+// dialSSHTestClient opens an authenticated connection and registers its cleanup.
+func dialSSHTestClient(t *testing.T, address string, key ssh.Signer) *ssh.Client {
+	t.Helper()
+	client, err := ssh.Dial("tcp", address, sshTestConfig(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+// connectTestClient starts the mcp exec channel and connects the SDK IO transport.
+func connectTestClient(t *testing.T, address string, key ssh.Signer) *mcp.ClientSession {
+	t.Helper()
+	client := dialSSHTestClient(t, address, key)
+	channel, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = channel.Close() })
+	reader, err := channel.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := channel.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := channel.Start("mcp"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
+	t.Cleanup(cancel)
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "mailbox-test", Version: "1.0.0"}, nil).Connect(ctx, &mcp.IOTransport{Reader: io.NopCloser(reader), Writer: writer}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
 	return session
 }
 
@@ -189,15 +194,4 @@ func callTool[Out any](t *testing.T, session *mcp.ClientSession, name string, ar
 		t.Fatalf("decode %q output: %v", name, err)
 	}
 	return out
-}
-
-type bearerTransport struct {
-	token string
-}
-
-func (transport bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	clone := req.Clone(req.Context())
-	clone.Header = req.Header.Clone()
-	clone.Header.Set("Authorization", "Bearer "+transport.token)
-	return http.DefaultTransport.RoundTrip(clone)
 }

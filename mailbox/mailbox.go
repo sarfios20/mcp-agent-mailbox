@@ -4,6 +4,7 @@ package mailbox
 import (
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -15,10 +16,9 @@ import (
 // sort correctly as text (RFC3339Nano drops trailing zeros and does not).
 const timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 
-// Store is a SQLite-backed mailbox for a fixed set of participants.
+// Store is a SQLite-backed mailbox with persisted participants.
 type Store struct {
-	db           *sql.DB
-	participants map[string]struct{}
+	db *sql.DB
 }
 
 // Message is one message in a thread.
@@ -48,7 +48,7 @@ type InboxEntry struct {
 }
 
 // Open opens a mailbox database and creates its schema when necessary.
-func Open(path string, participants []string) (*Store, error) {
+func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open database %q: %w", path, err)
@@ -68,6 +68,11 @@ func Open(path string, participants []string) (*Store, error) {
 	}
 
 	const schema = `
+CREATE TABLE IF NOT EXISTS participants (
+ name TEXT PRIMARY KEY,
+ public_key TEXT NOT NULL UNIQUE,
+ added_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS threads (
     id INTEGER PRIMARY KEY,
     subject TEXT,
@@ -98,11 +103,7 @@ CREATE TABLE IF NOT EXISTS receipts (
 		return nil, fmt.Errorf("create schema in database %q: %w", path, err)
 	}
 
-	known := make(map[string]struct{}, len(participants))
-	for _, participant := range participants {
-		known[participant] = struct{}{}
-	}
-	return &Store{db: db, participants: known}, nil
+	return &Store{db: db}, nil
 }
 
 // Close releases the database used by the store.
@@ -111,13 +112,79 @@ func (s *Store) Close() error {
 }
 
 // Participants returns every currently configured participant, sorted by name.
-func (s *Store) Participants() []string {
-	names := make([]string, 0, len(s.participants))
-	for name := range s.participants {
+func (s *Store) Participants() ([]string, error) {
+	rows, err := s.db.Query("SELECT name FROM participants ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := make([]string, 0)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
 		names = append(names, name)
 	}
-	sort.Strings(names)
-	return names
+	return names, rows.Err()
+}
+
+// AddParticipant registers a name and key, accepting an identical registration.
+func (s *Store) AddParticipant(name, publicKey string) error {
+	if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`).MatchString(name) {
+		return fmt.Errorf("invalid participant name %q", name)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var stored string
+	err = tx.QueryRow("SELECT public_key FROM participants WHERE name = ?", name).Scan(&stored)
+	if err == nil {
+		if stored != publicKey {
+			return fmt.Errorf("participant %q has another public key", name)
+		}
+		return tx.Commit()
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+	var owner string
+	err = tx.QueryRow("SELECT name FROM participants WHERE public_key = ?", publicKey).Scan(&owner)
+	if err == nil {
+		return fmt.Errorf("public key belongs to participant %q", owner)
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+	if _, err := tx.Exec("INSERT INTO participants(name, public_key, added_at) VALUES (?, ?, ?)", name, publicKey, time.Now().UTC().Format(timeLayout)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RemoveParticipant revokes a registration without deleting its thread history.
+func (s *Store) RemoveParticipant(name string) (bool, error) {
+	if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`).MatchString(name) {
+		return false, fmt.Errorf("invalid participant name %q", name)
+	}
+	result, err := s.db.Exec("DELETE FROM participants WHERE name = ?", name)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n != 0, err
+}
+
+// ParticipantByKey looks up the current owner of a normalized public key.
+func (s *Store) ParticipantByKey(publicKey string) (string, bool, error) {
+	var name string
+	err := s.db.QueryRow("SELECT name FROM participants WHERE public_key = ?", publicKey).Scan(&name)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	return name, err == nil, err
 }
 
 // Send creates a thread with me and the recipients, expanding ["*"] at send time.
@@ -126,8 +193,12 @@ func (s *Store) Send(me string, to []string, subject, text string) (threadID int
 		return 0, err
 	}
 	if len(to) == 1 && to[0] == "*" {
-		to = make([]string, 0, len(s.participants)-1)
-		for _, name := range s.Participants() {
+		names, err := s.Participants()
+		if err != nil {
+			return 0, err
+		}
+		to = make([]string, 0)
+		for _, name := range names {
 			if name != me {
 				to = append(to, name)
 			}
@@ -248,7 +319,7 @@ func (s *Store) AddToThread(me string, threadID int64, names []string) ([]string
 			return nil, fmt.Errorf("participant %q is duplicated", name)
 		}
 		seen[name] = struct{}{}
-		if err := s.validateParticipant(name); err != nil {
+		if err := validateParticipant(tx, name); err != nil {
 			return nil, err
 		}
 		for _, member := range members {
@@ -412,11 +483,17 @@ ORDER BY 4 DESC, t.id DESC`, me)
 	return entries, nil
 }
 
-func (s *Store) validateParticipant(name string) error {
-	if _, ok := s.participants[name]; !ok {
+// validateParticipant checks current registration before a mailbox operation.
+func (s *Store) validateParticipant(name string) error { return validateParticipant(s.db, name) }
+
+// validateParticipant uses the caller's connection or transaction to avoid nested queries.
+func validateParticipant(q interface{ QueryRow(string, ...any) *sql.Row }, name string) error {
+	var found string
+	err := q.QueryRow("SELECT name FROM participants WHERE name = ?", name).Scan(&found)
+	if err == sql.ErrNoRows {
 		return fmt.Errorf("participant %q is unknown", name)
 	}
-	return nil
+	return err
 }
 
 // threadParticipants lists the persisted members within the caller's transaction.
