@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"text/template"
@@ -19,25 +18,26 @@ import (
 //go:embed units/*
 var units embed.FS
 
-// Install provisions the root-owned configuration, systemd units, and validated SSH drop-in.
-// Existing tokens and data survive repeated calls; port changes restart an active server.
+// Install provisions the mailbox user, owned data and backup directories, and systemd units.
+// Repeated calls preserve data; reinstalling restarts an active server with the requested port.
 func Install(port int) (any, error) {
-	if err := requireRoot(); err != nil {
-		return nil, err
-	}
 	if port < 1 || port > 65535 {
 		return nil, fmt.Errorf("invalid port %d", port)
 	}
-	if err := supportedOS(); err != nil {
-		return nil, err
+	manual := fmt.Sprintf("run mcp-agent-mailbox serve --data %s --port %d by hand", DataDir, port)
+	if err := requireRoot(); err != nil {
+		return nil, fmt.Errorf("%w; %s", err, manual)
 	}
-	for _, tool := range []string{"systemctl", "sshd", "ss", "useradd", "groupadd", "getent"} {
+	if info, err := os.Stat(SystemdRuntimeDir); err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("install requires systemd; %s", manual)
+	}
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return nil, fmt.Errorf("install requires systemctl in PATH; %s", manual)
+	}
+	for _, tool := range []string{"ss", "useradd", "getent"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			return nil, fmt.Errorf("required command %s: %w", tool, err)
 		}
-	}
-	if err := checkSSHInclude(); err != nil {
-		return nil, err
 	}
 	if err := checkPort(port); err != nil {
 		return nil, err
@@ -56,66 +56,37 @@ func Install(port int) (any, error) {
 			return nil, err
 		}
 	}
-	if _, exists, err := lookup("group", TunnelGroup); err != nil {
+	account, exists, err := lookup("passwd", SystemUser)
+	if err != nil {
 		return nil, err
-	} else if !exists {
-		if _, err := command("groupadd", "--system", TunnelGroup); err != nil {
-			return nil, err
-		}
 	}
-	for _, dir := range []string{ConfigDir, BackupDir} {
+	fields := strings.Split(strings.TrimSpace(account), ":")
+	if !exists || len(fields) != 7 {
+		return nil, fmt.Errorf("invalid getent passwd output for %s: %q", SystemUser, account)
+	}
+	uid, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return nil, err
+	}
+	gid, err := strconv.Atoi(fields[3])
+	if err != nil {
+		return nil, err
+	}
+	for _, dir := range []string{DataDir, BackupDir} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return nil, err
 		}
-		if err := os.Chown(dir, 0, 0); err != nil {
+		if err := os.Chown(dir, uid, gid); err != nil {
 			return nil, err
 		}
 		if err := os.Chmod(dir, 0700); err != nil {
 			return nil, err
 		}
 	}
-	if err := os.MkdirAll(KeysDir, 0755); err != nil {
-		return nil, err
-	}
-	if err := os.Chown(KeysDir, 0, 0); err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(KeysDir, 0755); err != nil {
-		return nil, err
-	}
-	tokens := filepath.Join(ConfigDir, "tokens.json")
-	file, err := os.OpenFile(tokens, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err == nil {
-		_, writeErr := file.WriteString("{}\n")
-		closeErr := file.Close()
-		if writeErr != nil {
-			return nil, writeErr
-		}
-		if closeErr != nil {
-			return nil, closeErr
-		}
-	} else if !errors.Is(err, os.ErrExist) {
-		return nil, err
-	}
-	if err := writeFile(filepath.Join(ConfigDir, "config.json"), []byte(fmt.Sprintf("{\"port\":%d}\n", port)), 0600); err != nil {
-		return nil, err
-	}
 	for _, name := range []string{ServiceName, BackupServiceName, BackupTimerName} {
 		if err := writeTemplate(name, filepath.Join(UnitDir, name), port); err != nil {
 			return nil, err
 		}
-	}
-	if err := writeTemplate(filepath.Base(DropInPath), DropInPath, port); err != nil {
-		return nil, err
-	}
-	if _, err := command("sshd", "-t"); err != nil {
-		if removeErr := os.Remove(DropInPath); removeErr != nil {
-			return nil, fmt.Errorf("%w; remove invalid drop-in: %v", err, removeErr)
-		}
-		return nil, err
-	}
-	if err := reloadSSH(); err != nil {
-		return nil, err
 	}
 	if _, err := command("systemctl", "daemon-reload"); err != nil {
 		return nil, err
@@ -128,10 +99,10 @@ func Install(port int) (any, error) {
 			return nil, err
 		}
 	}
-	return map[string]any{"installed": true, "port": port, "binary": BinaryPath, "config_dir": ConfigDir, "data_dir": DataDir, "backup_dir": BackupDir}, nil
+	return map[string]any{"installed": true, "port": port, "binary": BinaryPath, "data_dir": DataDir, "backup_dir": BackupDir}, nil
 }
 
-// Uninstall removes managed units, tunnel accounts and their keys while preserving server data and configuration.
+// Uninstall removes the three managed units while preserving the mailbox user, data and backups.
 func Uninstall() (any, error) {
 	if err := requireRoot(); err != nil {
 		return nil, err
@@ -155,51 +126,7 @@ func Uninstall() (any, error) {
 	if _, err := command("systemctl", "daemon-reload"); err != nil {
 		return nil, err
 	}
-	group, exists, err := lookup("group", TunnelGroup)
-	if err != nil {
-		return nil, err
-	}
-	if exists {
-		fields := strings.Split(strings.TrimSpace(group), ":")
-		if len(fields) != 4 {
-			return nil, fmt.Errorf("invalid getent group output: %q", group)
-		}
-		members := make(map[string]bool)
-		for _, name := range strings.Split(fields[3], ",") {
-			members[name] = true
-		}
-		passwd, err := command("getent", "passwd")
-		if err != nil {
-			return nil, err
-		}
-		for _, line := range strings.Split(strings.TrimSpace(passwd), "\n") {
-			account := strings.Split(line, ":")
-			if len(account) != 7 {
-				return nil, fmt.Errorf("invalid getent passwd output: %q", line)
-			}
-			if account[0] != SystemUser && (account[3] == fields[2] || members[account[0]]) {
-				if err := deleteTunnelUser(account[0]); err != nil {
-					return nil, err
-				}
-			}
-		}
-		if _, err := command("groupdel", TunnelGroup); err != nil {
-			return nil, err
-		}
-	}
-	if err := os.RemoveAll(KeysDir); err != nil {
-		return nil, err
-	}
-	if err := removeFile(DropInPath); err != nil {
-		return nil, err
-	}
-	if _, err := command("sshd", "-t"); err != nil {
-		return nil, err
-	}
-	if err := reloadSSH(); err != nil {
-		return nil, err
-	}
-	return map[string]any{"uninstalled": true, "kept": []string{ConfigDir, DataDir, BackupDir}}, nil
+	return map[string]any{"uninstalled": true, "kept": []string{DataDir, BackupDir, SystemUser}}, nil
 }
 
 // command captures tool output without leaking it onto the CLI's JSON streams.
@@ -234,64 +161,6 @@ func requireRoot() error {
 	return nil
 }
 
-// supportedOS accepts only the distributions, minimum versions, and architectures in the installation contract.
-func supportedOS() error {
-	data, err := os.ReadFile(OSReleasePath)
-	if err != nil {
-		return fmt.Errorf("detect OS from %s: %w", OSReleasePath, err)
-	}
-	values := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		key, value, ok := strings.Cut(line, "=")
-		if ok {
-			values[key] = strings.Trim(value, "\"'")
-		}
-	}
-	id, version := values["ID"], values["VERSION_ID"]
-	parts := strings.Split(version, ".")
-	major, parseErr := strconv.Atoi(parts[0])
-	minor := 0
-	if len(parts) > 1 {
-		minor, err = strconv.Atoi(parts[1])
-	}
-	supported := parseErr == nil && err == nil && ((id == "debian" && major >= 12) || (id == "ubuntu" && (major > 22 || major == 22 && minor >= 4)))
-	if !supported || runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
-		return fmt.Errorf("unsupported OS ID=%q VERSION_ID=%q (%s/%s)", id, version, runtime.GOOS, runtime.GOARCH)
-	}
-	return nil
-}
-
-// checkSSHInclude requires a global Include whose glob covers the managed drop-in.
-func checkSSHInclude() error {
-	data, err := os.ReadFile(SSHConfigPath)
-	if err != nil {
-		return err
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line, _, _ = strings.Cut(line, "#")
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		if strings.EqualFold(fields[0], "Match") {
-			break
-		}
-		if !strings.EqualFold(fields[0], "Include") {
-			continue
-		}
-		for _, pattern := range fields[1:] {
-			pattern = strings.Trim(pattern, "\"'")
-			if !filepath.IsAbs(pattern) {
-				pattern = filepath.Join("/etc/ssh", pattern)
-			}
-			if match, _ := filepath.Match(pattern, DropInPath); match {
-				return nil
-			}
-		}
-	}
-	return fmt.Errorf("%s must have a global Include covering %s", SSHConfigPath, filepath.Dir(DropInPath))
-}
-
 // checkPort permits existing listeners only when every reported PID belongs to our systemd service.
 func checkPort(port int) error {
 	listeners, err := command("ss", "-ltnpH", fmt.Sprintf("sport = :%d", port))
@@ -321,20 +190,6 @@ func checkPort(port int) error {
 	return nil
 }
 
-// reloadSSH falls back to sshd only when the distribution has no ssh.service unit.
-func reloadSSH() error {
-	state, err := command("systemctl", "show", "--property=LoadState", "--value", "ssh.service")
-	if err != nil {
-		return err
-	}
-	name := "ssh"
-	if strings.TrimSpace(state) == "not-found" {
-		name = "sshd"
-	}
-	_, err = command("systemctl", "reload", name)
-	return err
-}
-
 // writeTemplate renders embedded units from the single installation settings file.
 func writeTemplate(name, path string, port int) error {
 	t, err := template.ParseFS(units, "units/"+name)
@@ -342,7 +197,7 @@ func writeTemplate(name, path string, port int) error {
 		return err
 	}
 	var rendered bytes.Buffer
-	settings := map[string]any{"Port": port, "BinaryPath": BinaryPath, "ConfigDir": ConfigDir, "DataDir": DataDir, "BackupDir": BackupDir, "SystemUser": SystemUser, "TunnelGroup": TunnelGroup, "KeysDir": KeysDir}
+	settings := map[string]any{"Port": port, "BinaryPath": BinaryPath, "DataDir": DataDir, "BackupDir": BackupDir, "SystemUser": SystemUser}
 	if err := t.Execute(&rendered, settings); err != nil {
 		return err
 	}
@@ -432,16 +287,4 @@ func copyExecutable() error {
 		return err
 	}
 	return os.Rename(output.Name(), BinaryPath)
-}
-
-// deleteTunnelUser kills active sessions before deleting an existing tunnel account.
-func deleteTunnelUser(user string) error {
-	if _, err := command("pkill", "-KILL", "-u", user); err != nil {
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
-			return err
-		}
-	}
-	_, err := command("userdel", user)
-	return err
 }

@@ -4,7 +4,9 @@ After=mcp-agent-mailbox.service
 
 [Service]
 Type=oneshot
-ExecStart={{.BinaryPath}} backup
+User={{.SystemUser}}
+Group={{.SystemUser}}
+ExecStart={{.BinaryPath}} backup --data {{.DataDir}}
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes

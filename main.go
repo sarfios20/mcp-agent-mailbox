@@ -21,7 +21,7 @@ func main() {
 // run validates subcommand arguments and returns the CLI exit status.
 func run(args []string) int {
 	usage := func() int {
-		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve [--data DIR] [--port N] | install [--port N] | add <name> --pubkey <file|-> --host <ssh-host> [--data DIR] | remove <name> [--data DIR] | doctor | backup | uninstall", "detail": nil})
+		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve [--data DIR] [--port N] | install [--port N] | add <name> --pubkey <file|-> --host <ssh-host> [--data DIR] | remove <name> [--data DIR] | doctor | backup [--data DIR] | uninstall", "detail": nil})
 		return 2
 	}
 	if len(args) == 0 {
@@ -90,10 +90,13 @@ func run(args []string) int {
 			exitCode = 1
 		}
 	case "backup":
-		if len(args) != 1 {
+		flags := flag.NewFlagSet("backup", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		data := flags.String("data", defaultDataDir, "data directory")
+		if flags.Parse(args[1:]) != nil || flags.NArg() != 0 {
 			return usage()
 		}
-		result, err = admin.Backup()
+		result, err = admin.Backup(*data)
 	case "uninstall":
 		if len(args) != 1 {
 			return usage()

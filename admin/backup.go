@@ -23,15 +23,12 @@ type BackupResult struct {
 	Deleted  []string `json:"deleted"`
 }
 
-// Backup requires root and holds the same exclusive lock for snapshot creation and pruning.
-func Backup() (BackupResult, error) {
-	if err := requireRoot(); err != nil {
+// Backup switches to the data owner and holds one lock for snapshot creation and pruning.
+func Backup(dataDir string) (BackupResult, error) {
+	if err := BecomeDataOwner(dataDir); err != nil {
 		return BackupResult{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(BackupLockPath), 0755); err != nil {
-		return BackupResult{}, err
-	}
-	lock, err := os.OpenFile(BackupLockPath, os.O_CREATE|os.O_WRONLY, 0600)
+	lock, err := os.OpenFile(filepath.Join(dataDir, BackupLockName), os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return BackupResult{}, err
 	}
@@ -43,7 +40,7 @@ func Backup() (BackupResult, error) {
 		return BackupResult{}, fmt.Errorf("lock backup: %w", err)
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	return createBackup(filepath.Join(DataDir, "mailbox.db"), BackupDir, time.Now)
+	return createBackup(filepath.Join(dataDir, "mailbox.db"), BackupDir, time.Now)
 }
 
 // createBackup takes a source path, destination directory and clock; pruning starts only
