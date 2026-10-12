@@ -63,8 +63,8 @@ func loadConfig() (Config, error) {
 	if err := json.Unmarshal(data, &tokens); err != nil {
 		return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: invalid JSON: %w", tokensFile, err)
 	}
-	if len(tokens) < 2 {
-		return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: at least two participants are required", tokensFile)
+	if tokens == nil {
+		return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: must be a JSON object", tokensFile)
 	}
 	seenTokens := make(map[string]string, len(tokens))
 	for name, token := range tokens {
@@ -96,8 +96,11 @@ func validateAddr(addr string) error {
 	if err != nil {
 		return fmt.Errorf("must have host:port format: %w", err)
 	}
-	if strings.TrimSpace(host) == "" {
-		return fmt.Errorf("host is empty")
+	if host != "localhost" {
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("host %q must be loopback", host)
+		}
 	}
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 {

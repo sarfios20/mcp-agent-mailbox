@@ -2,15 +2,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sarfios20/mcp-agent-mailbox/admin"
 	"github.com/sarfios20/mcp-agent-mailbox/mailbox"
 )
 
@@ -211,7 +216,55 @@ func translateThread(thread mailbox.Thread) threadOutput {
 	return out
 }
 
+// main dispatches non-interactive subcommands and emits one JSON result for administration.
 func main() {
+	os.Exit(run(os.Args[1:]))
+}
+
+// run validates subcommand arguments and returns the CLI exit status.
+func run(args []string) int {
+	usage := func() int {
+		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve | install [--port N] | uninstall"})
+		return 2
+	}
+	if len(args) == 0 {
+		return usage()
+	}
+	var result any
+	var err error
+	switch args[0] {
+	case "serve":
+		if len(args) != 1 {
+			return usage()
+		}
+		serve()
+		return 0
+	case "install":
+		flags := flag.NewFlagSet("install", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		port := flags.Int("port", admin.DefaultPort, "loopback port")
+		if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *port < 1 || *port > 65535 {
+			return usage()
+		}
+		result, err = admin.Install(*port)
+	case "uninstall":
+		if len(args) != 1 {
+			return usage()
+		}
+		result, err = admin.Uninstall()
+	default:
+		return usage()
+	}
+	if err != nil {
+		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": err.Error()})
+		return 1
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(result)
+	return 0
+}
+
+// serve opens the mailbox and serves the authenticated MCP endpoint.
+func serve() {
 	config, err := loadConfig()
 	if err != nil {
 		log.Fatal(err)

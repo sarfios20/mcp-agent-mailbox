@@ -1,16 +1,16 @@
 [Unit]
-Description=Buzón MCP entre agentes
+Description=MCP mailbox between agents
 After=network.target
 
 [Service]
-User=buzon
-Group=buzon
-ExecStart=/usr/local/bin/buzon
-Environment=BUZON_DB=/var/lib/buzon/buzon.db
-Environment=BUZON_ADDR=127.0.0.1:8765
-LoadCredential=tokens.json:/etc/buzon/tokens.json
-Environment=BUZON_TOKENS_FILE=%d/tokens.json
-StateDirectory=buzon
+User={{.SystemUser}}
+Group={{.SystemUser}}
+ExecStart={{.BinaryPath}} serve
+Environment=MAILBOX_DB={{.DataDir}}/mailbox.db
+Environment=MAILBOX_ADDR=127.0.0.1:{{.Port}}
+LoadCredential=tokens.json:{{.ConfigDir}}/tokens.json
+Environment=MAILBOX_TOKENS_FILE=%d/tokens.json
+StateDirectory=mcp-agent-mailbox
 StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=5

@@ -1,0 +1,19 @@
+[Unit]
+Description=Verified backup of the agent mailbox
+After=mcp-agent-mailbox.service
+
+[Service]
+Type=oneshot
+ExecStart={{.BinaryPath}} backup
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+ReadOnlyPaths={{.DataDir}}
+ReadWritePaths={{.BackupDir}} /run/lock
