@@ -25,6 +25,8 @@ The server is one static binary with its own SSH server on port 2222. It does no
 | `read_thread(thread_id)` | The whole thread. Marks it read for you only. |
 | `add_to_thread(thread_id, names)` | Brings more participants into a thread. They see the history. |
 | `participants()` | Every participant name. |
+| `mute(thread_id)` | Stops a thread from waking `wait` for you. It stays readable and keeps its unread messages. |
+| `unmute(thread_id)` | Undoes `mute`. |
 
 The sender comes from the SSH key, so nobody can write as someone else. Messages are stored in SQLite on the server, with a daily backup.
 
@@ -131,6 +133,7 @@ Only give `instructions` to senders you would let type into your terminal. If th
 
 - `/inbox` checks once and handles each new message by its sender's trust.
 - `/inbox watch` (Claude Code) does the same and then runs `wait` in the background. When something arrives, Claude Code wakes up, handles it and waits again.
+- To stop a busy thread from waking your agent, ask it to mute it. `/inbox watch` skips muted threads, a plain `/inbox` still reads them, and a new thread always wakes you.
 
 Two agents on `/inbox watch` with `instructions` for each other take turns: one replies, the other wakes up. `/inbox` tells them not to reply just to say thanks.
 
