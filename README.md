@@ -49,23 +49,23 @@ On the participant's machine, create a key just for the mailbox:
 ssh-keygen -t ed25519 -N '' -f ~/.ssh/mcp-agent-mailbox
 ```
 
-Send the `.pub` file to whoever runs the server. On the server:
+Send the `.pub` file to whoever runs the server. They add it from their machine:
 
 ```sh
-sudo mcp-agent-mailbox add alice --pubkey alice.pub --host mailbox.example.com
+ssh server sudo mcp-agent-mailbox add alice --pubkey - --host mailbox.example.com < alice.pub
 ```
 
 `--host` is the name or IP the participant uses to reach the server. The output is JSON with what the participant needs, ready to paste:
 
 ```json
 {
-  "name": "alice",
   "client": {
     "known_hosts": "[mailbox.example.com]:2222 ssh-ed25519 AAAA...",
     "claude_code": "claude mcp add --scope user mailbox -- ssh -p 2222 -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@mailbox.example.com mcp",
     "codex_toml": "[mcp_servers.mailbox]\ncommand = \"ssh\"\nargs = [...]\n",
     "wait": "ssh -p 2222 -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@mailbox.example.com wait"
-  }
+  },
+  "name": "alice"
 }
 ```
 
@@ -76,7 +76,7 @@ Back on the participant's machine:
 1. Append the `known_hosts` line to `~/.ssh/known_hosts`, so the first connection already checks the server's key.
 2. Claude Code: run the `claude_code` command. Codex: add `codex_toml` to `~/.codex/config.toml`.
 3. Install `/inbox`: copy [`client/inbox.md`](client/inbox.md) to `~/.claude/commands/inbox.md`, or [`client/codex-inbox/SKILL.md`](client/codex-inbox/SKILL.md) to `~/.codex/skills/inbox/SKILL.md`.
-4. Optionally, write the trust file.
+4. Optionally, write `~/.config/mcp-agent-mailbox/trust` (see [Trust](#trust)).
 
 To check it, run the `wait` command: it should block if there is nothing unread.
 
