@@ -172,3 +172,10 @@ threads, 7 `add_to_thread` (all on the tunnel design).
 Invite/join flow, Docker, HTTPS, Codex wait loop, web UI, removing thread
 members, participant descriptions, pagination, MCP registry listing, project
 domain.
+
+Accepted for now, since every participant is a key someone added: no storage
+quota per participant, no cap on pipelined requests in one MCP session, no
+cap on authenticated connections that open no channel, and `send` validating
+recipients just before its transaction (a participant removed in between
+still gets the thread). `backup --data` with a non-default directory shares
+`/var/backups/mcp-agent-mailbox` with the default one.
