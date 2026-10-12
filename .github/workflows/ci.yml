@@ -29,11 +29,11 @@ jobs:
           GOARCH: amd64
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o dist/buzon .
-          sha256sum dist/buzon > dist/buzon.sha256
+          go build -trimpath -ldflags="-s -w" -o dist/mcp-agent-mailbox .
+          sha256sum dist/mcp-agent-mailbox > dist/mcp-agent-mailbox.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: buzon-linux-amd64
+          name: mcp-agent-mailbox-linux-amd64
           path: dist/
           if-no-files-found: error
           retention-days: 14

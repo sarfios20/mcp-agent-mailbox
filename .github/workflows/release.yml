@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Build static Linux binaries
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+        run: |
+          mkdir -p dist
+          GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/mcp-agent-mailbox-linux-amd64 .
+          GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/mcp-agent-mailbox-linux-arm64 .
+          cp install.sh dist/
+          cd dist
+          sha256sum mcp-agent-mailbox-linux-amd64 mcp-agent-mailbox-linux-arm64 > SHA256SUMS
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes \
+            dist/mcp-agent-mailbox-linux-amd64 \
+            dist/mcp-agent-mailbox-linux-arm64 \
+            dist/SHA256SUMS \
+            dist/install.sh
