@@ -17,4 +17,8 @@ const (
 	keepaliveInterval = 30 * time.Second
 	// keepaliveTimeout closes a connection whose peer does not answer a keepalive in time.
 	keepaliveTimeout = 15 * time.Second
+	// maxTextBytes caps one message's text, so threads stay readable in one tool result.
+	maxTextBytes = 64 << 10
+	// maxSubjectBytes caps a thread subject.
+	maxSubjectBytes = 256
 )

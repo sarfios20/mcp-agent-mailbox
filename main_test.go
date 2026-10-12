@@ -234,3 +234,19 @@ func TestSessionStopsWhenItsKeyIsReplaced(t *testing.T) {
 		t.Fatal("send over a session whose key was replaced was accepted")
 	}
 }
+
+// Catches a participant storing messages larger than one tool result can carry.
+func TestSendAndReplyRejectOversizedText(t *testing.T) {
+	address, keys, _ := startSSHTestServer(t)
+	alice := connectTestClient(t, address, keys["alice"])
+	sent := callTool[sendOutput](t, alice, "send", map[string]any{"to": []string{"bob"}, "subject": "s", "text": strings.Repeat("a", maxTextBytes)})
+	for name, args := range map[string]map[string]any{
+		"send":  {"to": []string{"bob"}, "subject": "s", "text": strings.Repeat("a", maxTextBytes+1)},
+		"reply": {"thread_id": sent.ThreadID, "text": strings.Repeat("a", maxTextBytes+1)},
+	} {
+		result, err := alice.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
+		if err == nil && !result.IsError {
+			t.Fatalf("%s accepted text over %d bytes", name, maxTextBytes)
+		}
+	}
+}

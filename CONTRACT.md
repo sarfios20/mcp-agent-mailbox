@@ -80,6 +80,8 @@ subcommands switch to that user before opening it.
 None accepts the sender: it comes from the SSH key. Errors: empty or
 duplicate `to`, the sender in `to`, unknown names, a non-member reading,
 replying or adding, adding someone already in the thread.
+Size limits in `config.go`, checked in `tools.go`: message text 64 KiB,
+subject 256 bytes.
 
 ## SSH server
 

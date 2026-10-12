@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -132,6 +133,9 @@ func newMCPServer(store *mailbox.Store, me, publicKey string) *mcp.Server {
 		Name:        "reply",
 		Description: "Adds a reply to every other thread member; the sender is always the authenticated participant and must belong to the thread.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input replyInput) (*mcp.CallToolResult, replyOutput, error) {
+		if err := checkSize("text", input.Text, maxTextBytes); err != nil {
+			return nil, replyOutput{}, err
+		}
 		messageID, err := store.Reply(me, input.ThreadID, input.Text)
 		if err != nil {
 			return nil, replyOutput{}, err
@@ -143,6 +147,12 @@ func newMCPServer(store *mailbox.Store, me, publicKey string) *mcp.Server {
 		Name:        "send",
 		Description: "Creates a thread with the recipient names in to, or [\"*\"] for every other current participant, and sends its first message; the sender is always the authenticated participant.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input sendInput) (*mcp.CallToolResult, sendOutput, error) {
+		if err := checkSize("subject", input.Subject, maxSubjectBytes); err != nil {
+			return nil, sendOutput{}, err
+		}
+		if err := checkSize("text", input.Text, maxTextBytes); err != nil {
+			return nil, sendOutput{}, err
+		}
 		threadID, err := store.Send(me, input.To, input.Subject, input.Text)
 		if err != nil {
 			return nil, sendOutput{}, err
@@ -170,6 +180,14 @@ func newMCPServer(store *mailbox.Store, me, publicKey string) *mcp.Server {
 	})
 
 	return server
+}
+
+// checkSize rejects a field longer than limit bytes, naming the field and both sizes.
+func checkSize(field, value string, limit int) error {
+	if len(value) > limit {
+		return fmt.Errorf("%s is %d bytes, the limit is %d", field, len(value), limit)
+	}
+	return nil
 }
 
 func translateThread(thread mailbox.Thread) threadOutput {
