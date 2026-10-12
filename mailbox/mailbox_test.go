@@ -258,3 +258,23 @@ func TestGroupReadPreservesOtherMembersUnread(t *testing.T) {
 		}
 	}
 }
+
+// Catches an expired invite still registering a key, and expired invites
+// keeping unregistered keys admitted at auth.
+func TestExpiredInviteCannotJoin(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Now()
+	if err := store.CreateInvite("dave", "host", "hash", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(2 * time.Hour)
+	if pending, err := store.HasPendingInvites(later); err != nil || pending {
+		t.Fatalf("HasPendingInvites after expiry = %v, %v; want false", pending, err)
+	}
+	if _, _, err := store.Join("hash", "key-dave", later); err == nil {
+		t.Fatal("an expired invite registered a key")
+	}
+	if _, _, err := store.Join("hash", "key-dave", now); err != nil {
+		t.Fatalf("Join before expiry: %v", err)
+	}
+}
