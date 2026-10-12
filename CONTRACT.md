@@ -34,16 +34,35 @@ except the copyright line in `LICENSE`.
 
 ## Data and states
 
-Unchanged from the private server. Two tables, `threads(id, subject, a, b,
-created_at)` and `messages(id, thread_id, sender, recipient, content,
-created_at, read_at)`. RFC 3339 UTC, set by the server. A thread has exactly
-two participants. A message is `unread` (`read_at IS NULL`) → `read`, only when
-its recipient calls `read_thread`.
+```sql
+threads(id, subject, created_by, created_at)
+thread_members(thread_id, participant, added_at)  -- PK (thread_id, participant)
+messages(id, thread_id, sender, content, created_at)
+receipts(message_id, participant, read_at NULL)   -- PK (message_id, participant)
+```
+
+- RFC 3339 UTC, set by the server. No migration from the two-party schema.
+- A thread has 2 or more members. Members are only ever added, never removed.
+- A new message gets one receipt per member except its sender, at insert time.
+- A receipt is `unread` (`read_at IS NULL`) → `read`, only when its
+  participant calls `read_thread`. One member reading never affects another.
+- A member added later sees the whole history and gets receipts for messages
+  sent after joining only.
 
 ## MCP tools
 
-`inbox()`, `read_thread(thread_id)`, `reply(thread_id, text)`,
-`send(to, subject, text)`. None accepts the sender: it comes from the token.
+- `send(to, subject, text)`: `to` is a list of names, or `["*"]` for every
+  current participant except the sender, expanded at send time.
+- `reply(thread_id, text)`: to every member except the sender.
+- `read_thread(thread_id)`: marks the caller's receipts read. Each message
+  carries `unread` for the caller. Thread carries `participants`.
+- `inbox()`: threads with unread receipts for the caller, with `participants`.
+- `add_to_thread(thread_id, names)`: any member adds participants.
+- `participants()`: every participant name.
+
+None accepts the sender: it comes from the token. Errors: empty or duplicate
+`to`, the sender in `to`, unknown names, a non-member reading, replying or
+adding, adding someone already in the thread.
 
 ## Identity
 
@@ -127,9 +146,10 @@ linux amd64 and arm64 plus `SHA256SUMS` attached to a GitHub Release.
 | 3c | `admin/` (doctor) | `test/e2e.sh doctor` | codex |
 | 3d | `admin/` (backup), drop `deploy/*.py` | `test/e2e.sh backup` and retention unit tests ported from Python | codex |
 | 4 | `install.sh`, `.github/workflows/` | tag on a fork produces the Release; `install.sh` installs it in the e2e VM | codex |
+| 6 | `mailbox/`, `main.go`, `main_test.go` | N members, `*`, `participants`: `go test ./...`, `test/e2e.sh add` | codex |
+| 7 | same | `add_to_thread`: `go test ./...`, `test/e2e.sh add` | codex |
 | 5 | `client/`, `README.md` | a fresh `claude -p` given only the README installs in the e2e VM and exchanges a message | me, prose shown first |
 
 ## Out
 
-Docker, public HTTPS without tunnel, web UI, threads with more than two
-participants, pagination, notifications, MCP registry listing, project domain.
+Docker, public HTTPS without tunnel, web UI, removing thread members, participant descriptions, pagination, notifications, MCP registry listing, project domain.

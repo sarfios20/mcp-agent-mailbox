@@ -24,6 +24,7 @@ SSH_PORT=${E2E_SSH_PORT:-2222}
 HTTP_PORT=${E2E_HTTP_PORT:-18800}
 TUNNEL_A=18801
 TUNNEL_B=18802
+TUNNEL_C=18804
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 W=$(mktemp -d)
 PIDS=()
@@ -47,6 +48,9 @@ mcp() {
   curl -sS -H "Authorization: Bearer $2" -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' -d "$3" "http://127.0.0.1:$1/mcp"
 }
+# sc: the tool result; iserr: succeeds if the call failed.
+sc() { jq -c .result.structuredContent; }
+iserr() { jq -e '(.error != null) or (.result.isError == true)' >/dev/null; }
 call() { mcp "$1" "$2" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$3\",\"arguments\":$4}}"; }
 
 step "build"
@@ -56,7 +60,7 @@ step "boot VM"
 mkdir -p "$CACHE"
 [ -f "$CACHE/base.qcow2" ] || curl -fsSL -o "$CACHE/base.qcow2" "$IMAGE_URL"
 qemu-img create -q -f qcow2 -b "$CACHE/base.qcow2" -F qcow2 "$W/disk.qcow2" 4G
-for k in admin alice bob; do ssh-keygen -q -t ed25519 -N '' -f "$W/$k"; done
+for k in admin alice bob carol; do ssh-keygen -q -t ed25519 -N '' -f "$W/$k"; done
 mkdir "$W/seed"
 printf 'instance-id: e2e\nlocal-hostname: e2e\n' > "$W/seed/meta-data"
 printf '#cloud-config\nssh_authorized_keys:\n  - %s\n' "$(cat "$W/admin.pub")" > "$W/seed/user-data"
@@ -109,11 +113,12 @@ step "add"
 add() { vm "sudo mcp-agent-mailbox add $1 --pubkey - --host e2e-vps" < "$W/$1.pub"; }
 add alice > "$W/alice.json" || fail "add alice failed"
 add bob > "$W/bob.json" || fail "add bob failed"
+add carol > "$W/carol.json" || fail "add carol failed"
 for k in token ssh_user client.ssh_config client.tunnel_systemd client.tunnel_launchd \
          client.tunnel_windows client.claude_code client.codex_toml; do
   jq -e ".$k | strings | length > 0" "$W/alice.json" >/dev/null || fail "add output lacks $k"
 done
-TA=$(jq -r .token "$W/alice.json"); TB=$(jq -r .token "$W/bob.json")
+TA=$(jq -r .token "$W/alice.json"); TB=$(jq -r .token "$W/bob.json"); TC=$(jq -r .token "$W/carol.json")
 [[ $TA =~ ^[0-9a-f]{64}$ ]] || fail "token is not 64 hex: $TA"
 [ "$(add alice | jq -r .token)" = "$TA" ] || fail "re-adding alice changed her token"
 vm 'sudo mcp-agent-mailbox add Bad_Name --pubkey - --host x' < "$W/bob.pub" >/dev/null 2>&1 && fail "invalid name accepted"
@@ -121,10 +126,33 @@ vm 'sudo mcp-agent-mailbox add Bad_Name --pubkey - --host x' < "$W/bob.pub" >/de
 ssh "${SSHO[@]}" -i "$W/alice" mailbox-alice@127.0.0.1 true 2>/dev/null && fail "tunnel user got a shell"
 ssh "${SSHO[@]}" -i "$W/alice" -N -o ExitOnForwardFailure=yes -L "$TUNNEL_A:127.0.0.1:8765" mailbox-alice@127.0.0.1 & PIDS+=($!)
 ssh "${SSHO[@]}" -i "$W/bob" -N -o ExitOnForwardFailure=yes -L "$TUNNEL_B:127.0.0.1:8765" mailbox-bob@127.0.0.1 & PIDS+=($!)
+ssh "${SSHO[@]}" -i "$W/carol" -N -o ExitOnForwardFailure=yes -L "$TUNNEL_C:127.0.0.1:8765" mailbox-carol@127.0.0.1 & PIDS+=($!)
 sleep 3
-call $TUNNEL_A "$TA" send '{"to":"bob","subject":"e2e","text":"hello bob"}' | jq -e '.result.structuredContent.thread_id' >/dev/null || fail "alice could not send"
-call $TUNNEL_B "$TB" inbox '{}' | jq -e '.result.structuredContent.threads[0].with == "alice"' >/dev/null || fail "bob does not see alice's thread"
-call $TUNNEL_B "$TB" read_thread '{"thread_id":1}' | jq -e '.result.structuredContent.thread.messages[0].content == "hello bob"' >/dev/null || fail "bob cannot read the message"
+
+# Thread 1: alice -> bob.
+call $TUNNEL_A "$TA" participants '{}' | sc | jq -e '.participants | sort == ["alice","bob","carol"]' >/dev/null || fail "participants is not alice, bob, carol"
+call $TUNNEL_A "$TA" send '{"to":["bob"],"subject":"e2e","text":"hello bob"}' | sc | jq -e '.thread_id == 1' >/dev/null || fail "alice could not send"
+call $TUNNEL_B "$TB" inbox '{}' | sc | jq -e '.threads[0].participants | sort == ["alice","bob"]' >/dev/null || fail "bob does not see alice's thread"
+call $TUNNEL_B "$TB" read_thread '{"thread_id":1}' | sc | jq -e '.thread.messages[0] | .content == "hello bob" and .unread == true' >/dev/null || fail "bob cannot read the new message"
+call $TUNNEL_B "$TB" read_thread '{"thread_id":1}' | sc | jq -e '.thread.messages[0].unread == false' >/dev/null || fail "message still unread after reading"
+call $TUNNEL_C "$TC" read_thread '{"thread_id":1}' | iserr || fail "carol read a thread she is not in"
+
+# Thread 2: alice -> bob, carol; bob replies to both.
+call $TUNNEL_A "$TA" send '{"to":["bob","carol"],"subject":"group","text":"hello both"}' | sc | jq -e '.thread_id == 2' >/dev/null || fail "group send failed"
+call $TUNNEL_B "$TB" reply '{"thread_id":2,"text":"bob here"}' | sc | jq -e '.message_id' >/dev/null || fail "bob could not reply"
+call $TUNNEL_C "$TC" inbox '{}' | sc | jq -e '.threads[] | select(.thread_id == 2) | .unread == 2' >/dev/null || fail "carol does not have 2 unread in the group"
+call $TUNNEL_A "$TA" inbox '{}' | sc | jq -e '.threads[] | select(.thread_id == 2) | .unread == 1' >/dev/null || fail "alice does not have bob's reply unread"
+call $TUNNEL_C "$TC" read_thread '{"thread_id":2}' >/dev/null
+call $TUNNEL_B "$TB" inbox '{}' | sc | jq -e '.threads[] | select(.thread_id == 2) | .unread == 1' >/dev/null || fail "carol reading changed bob's unread"
+
+# Thread 3: alice -> everyone.
+call $TUNNEL_A "$TA" send '{"to":["*"],"subject":"all","text":"hello all"}' | sc | jq -e '.thread_id == 3' >/dev/null || fail "send to * failed"
+call $TUNNEL_C "$TC" read_thread '{"thread_id":3}' | sc | jq -e '.thread.participants | sort == ["alice","bob","carol"]' >/dev/null || fail "* did not reach everyone"
+
+call $TUNNEL_A "$TA" send '{"to":[],"subject":"x","text":"x"}' | iserr || fail "empty to accepted"
+call $TUNNEL_A "$TA" send '{"to":["bob","bob"],"subject":"x","text":"x"}' | iserr || fail "duplicate to accepted"
+call $TUNNEL_A "$TA" send '{"to":["alice"],"subject":"x","text":"x"}' | iserr || fail "sending to yourself accepted"
+call $TUNNEL_A "$TA" send '{"to":["nobody"],"subject":"x","text":"x"}' | iserr || fail "unknown recipient accepted"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$TUNNEL_A/mcp")
 [ "$code" = 401 ] || fail "no token through tunnel gave $code, want 401"
 
@@ -151,7 +179,7 @@ if [ $LEVEL -ge 4 ]; then
 # ----------------------------------------------------------------- backup
 step "backup"
 vm 'sudo mcp-agent-mailbox backup' | jq -e . >/dev/null || fail "backup failed"
-vm "sudo sh -c 'cd /var/backups/mcp-agent-mailbox && f=\$(ls *.sqlite | tail -1) && sha256sum --check --quiet \"\${f%.sqlite}.sha256\" && sqlite3 \"\$f\" \"select count(*) from messages\" | grep -qx 1'" \
+vm "sudo sh -c 'cd /var/backups/mcp-agent-mailbox && f=\$(ls *.sqlite | tail -1) && sha256sum --check --quiet \"\${f%.sqlite}.sha256\" && [ \"\$(sqlite3 \"\$f\" \"select count(*) from messages\")\" = \"\$(sqlite3 /var/lib/mcp-agent-mailbox/mailbox.db \"select count(*) from messages\")\" ]'" \
   || fail "backup missing, checksum wrong or messages lost"
 fi
 
