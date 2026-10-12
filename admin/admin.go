@@ -74,6 +74,15 @@ func Install(port int) (any, error) {
 			return nil, err
 		}
 	}
+	if err := os.MkdirAll(KeysDir, 0755); err != nil {
+		return nil, err
+	}
+	if err := os.Chown(KeysDir, 0, 0); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(KeysDir, 0755); err != nil {
+		return nil, err
+	}
 	tokens := filepath.Join(ConfigDir, "tokens.json")
 	file, err := os.OpenFile(tokens, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err == nil {
@@ -122,7 +131,7 @@ func Install(port int) (any, error) {
 	return map[string]any{"installed": true, "port": port, "binary": BinaryPath, "config_dir": ConfigDir, "data_dir": DataDir, "backup_dir": BackupDir}, nil
 }
 
-// Uninstall removes managed units and tunnel accounts while preserving the server user and all persistent files.
+// Uninstall removes managed units, tunnel accounts and their keys while preserving server data and configuration.
 func Uninstall() (any, error) {
 	if err := requireRoot(); err != nil {
 		return nil, err
@@ -169,7 +178,7 @@ func Uninstall() (any, error) {
 				return nil, fmt.Errorf("invalid getent passwd output: %q", line)
 			}
 			if account[0] != SystemUser && (account[3] == fields[2] || members[account[0]]) {
-				if _, err := command("userdel", "--force", account[0]); err != nil {
+				if err := deleteTunnelUser(account[0]); err != nil {
 					return nil, err
 				}
 			}
@@ -177,6 +186,9 @@ func Uninstall() (any, error) {
 		if _, err := command("groupdel", TunnelGroup); err != nil {
 			return nil, err
 		}
+	}
+	if err := os.RemoveAll(KeysDir); err != nil {
+		return nil, err
 	}
 	if err := removeFile(DropInPath); err != nil {
 		return nil, err
@@ -330,7 +342,7 @@ func writeTemplate(name, path string, port int) error {
 		return err
 	}
 	var rendered bytes.Buffer
-	settings := map[string]any{"Port": port, "BinaryPath": BinaryPath, "ConfigDir": ConfigDir, "DataDir": DataDir, "BackupDir": BackupDir, "SystemUser": SystemUser, "TunnelGroup": TunnelGroup}
+	settings := map[string]any{"Port": port, "BinaryPath": BinaryPath, "ConfigDir": ConfigDir, "DataDir": DataDir, "BackupDir": BackupDir, "SystemUser": SystemUser, "TunnelGroup": TunnelGroup, "KeysDir": KeysDir}
 	if err := t.Execute(&rendered, settings); err != nil {
 		return err
 	}

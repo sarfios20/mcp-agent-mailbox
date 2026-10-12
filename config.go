@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sarfios20/mcp-agent-mailbox/admin"
 )
 
 // HTTP server limits. They do not depend on the environment: change them here.
@@ -67,12 +70,14 @@ func loadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: must be a JSON object", tokensFile)
 	}
 	seenTokens := make(map[string]string, len(tokens))
+	namePattern := regexp.MustCompile(admin.ParticipantNamePattern)
+	tokenPattern := regexp.MustCompile(admin.TokenPattern)
 	for name, token := range tokens {
-		if strings.TrimSpace(name) == "" {
-			return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: empty participant name", tokensFile)
+		if !namePattern.MatchString(name) {
+			return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: invalid participant name %q", tokensFile, name)
 		}
-		if strings.TrimSpace(token) == "" {
-			return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: empty token for %q", tokensFile, name)
+		if !tokenPattern.MatchString(token) {
+			return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: invalid token for participant %q", tokensFile, name)
 		}
 		if previous, exists := seenTokens[token]; exists {
 			return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: duplicate token for %q and %q", tokensFile, previous, name)

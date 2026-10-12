@@ -15,6 +15,14 @@ const (
 	BackupDir = "/var/backups/mcp-agent-mailbox"
 	// DropInPath is the only SSH configuration file managed by this package.
 	DropInPath = "/etc/ssh/sshd_config.d/10-mcp-agent-mailbox.conf"
+	// KeysDir holds root-owned public keys outside tunnel users' home directories.
+	KeysDir = "/etc/ssh/mcp-agent-mailbox-keys"
+	// ParticipantNamePattern restricts names used in tokens and Unix account paths.
+	ParticipantNamePattern = `^[a-z][a-z0-9-]{0,31}$`
+	// TokenPattern requires a lowercase hex encoding of a 256-bit bearer token.
+	TokenPattern = `^[0-9a-f]{64}$`
+	// TokenBytes is the number of cryptographically random bytes in each token.
+	TokenBytes = 32
 	// SystemUser owns the mailbox data and runs the server.
 	SystemUser = "mailbox"
 	// TunnelGroup identifies restricted SSH tunnel accounts.

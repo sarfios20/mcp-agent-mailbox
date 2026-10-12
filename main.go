@@ -224,7 +224,7 @@ func main() {
 // run validates subcommand arguments and returns the CLI exit status.
 func run(args []string) int {
 	usage := func() int {
-		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve | install [--port N] | uninstall"})
+		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve | install [--port N] | add <name> --pubkey <file|-> --host <ssh-host> | remove <name> | uninstall"})
 		return 2
 	}
 	if len(args) == 0 {
@@ -247,6 +247,27 @@ func run(args []string) int {
 			return usage()
 		}
 		result, err = admin.Install(*port)
+	case "add":
+		if len(args) < 2 {
+			return usage()
+		}
+		flags := flag.NewFlagSet("add", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		pubkey := flags.String("pubkey", "", "OpenSSH public key file or - for stdin")
+		host := flags.String("host", "", "SSH host")
+		name := args[1]
+		if flags.Parse(args[2:]) != nil || flags.NArg() != 0 {
+			return usage()
+		}
+		if *pubkey == "" || *host == "" {
+			return usage()
+		}
+		result, err = admin.Add(name, *pubkey, *host)
+	case "remove":
+		if len(args) != 2 {
+			return usage()
+		}
+		result, err = admin.Remove(args[1])
 	case "uninstall":
 		if len(args) != 1 {
 			return usage()

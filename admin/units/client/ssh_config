@@ -1,0 +1,9 @@
+Host mcp-agent-mailbox
+    HostName {{.Host}}
+    User {{.User}}
+    IdentityFile ~/.ssh/mcp-agent-mailbox
+    IdentitiesOnly yes
+    ExitOnForwardFailure yes
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    LocalForward 127.0.0.1:{{.Port}} 127.0.0.1:{{.Port}}

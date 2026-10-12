@@ -1,0 +1,5 @@
+$taskUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$taskAction = New-ScheduledTaskAction -Execute 'ssh.exe' -Argument '-NT mcp-agent-mailbox'
+$taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+$taskSettings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName 'mcp-agent-mailbox-tunnel' -Action $taskAction -Trigger $taskTrigger -Settings $taskSettings -User $taskUser -RunLevel Limited -Force

@@ -1,0 +1,10 @@
+[Unit]
+Description=SSH tunnel to mcp-agent-mailbox
+
+[Service]
+ExecStart=/usr/bin/ssh -NT mcp-agent-mailbox
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
