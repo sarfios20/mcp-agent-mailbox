@@ -87,8 +87,9 @@ subject 256 bytes.
 
 - Listens on all interfaces, default port 2222. The SSH user name is ignored:
   the public key alone identifies the participant. Unknown keys are refused.
-  Every tool call, and `wait` before it answers, checks that the key still
-  belongs to that participant, so an open session dies with `remove`.
+  Every new channel, tool call, and `wait` before it answers, checks that
+  the key still belongs to that participant. The keepalive tick closes
+  connections whose key was removed or replaced.
 - Only public key auth. Key types: ed25519, ecdsa, rsa of 2048 bits or more.
 - Only `session` channels with an `exec` request are accepted. Commands:
   - `mcp`: an MCP session over the channel's stdin/stdout as that participant.

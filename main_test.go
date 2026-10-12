@@ -250,3 +250,17 @@ func TestSendAndReplyRejectOversizedText(t *testing.T) {
 		}
 	}
 }
+
+// Catches a connection authenticated before remove opening new sessions and
+// taking the session slots of the name's next key.
+func TestRemovedKeyCannotOpenSessions(t *testing.T) {
+	address, keys, store := startSSHTestServer(t)
+	client := dialSSHTestClient(t, address, keys["alice"])
+	if _, err := store.RemoveParticipant("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if session, err := client.NewSession(); err == nil {
+		session.Close()
+		t.Fatal("a removed key opened a session over its old connection")
+	}
+}

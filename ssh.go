@@ -99,6 +99,10 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 	server.ChannelHandlers = map[string]gliderssh.ChannelHandler{"session": func(_ *gliderssh.Server, _ *ssh.ServerConn, incoming ssh.NewChannel, ctx gliderssh.Context) {
 		name, _ := ctx.Value(participantContextKey{}).(string)
 		publicKey, _ := ctx.Value(publicKeyContextKey{}).(string)
+		if err := stillRegistered(store, name, publicKey); err != nil {
+			_ = incoming.Reject(ssh.Prohibited, err.Error())
+			return
+		}
 		mu.Lock()
 		if sessions[name] >= sessionsPerParticipant {
 			mu.Unlock()
@@ -193,6 +197,13 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
+					// A connection whose key was removed or replaced is closed, freeing its session slots.
+					if name, ok := ctx.Value(participantContextKey{}).(string); ok {
+						if stillRegistered(store, name, ctx.Value(publicKeyContextKey{}).(string)) != nil {
+							_ = conn.Close()
+							return
+						}
+					}
 					if authenticated, ok := ctx.Value(gliderssh.ContextKeyConn).(*ssh.ServerConn); ok {
 						// SendRequest waits for the reply with no limit of its own.
 						unanswered := time.AfterFunc(keepaliveTimeout, func() { _ = conn.Close() })
