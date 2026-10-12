@@ -74,7 +74,7 @@ func Doctor() (DoctorResult, error) {
 
 	err = doctorActive(BackupTimerName)
 	add("backup_timer_active", BackupTimerName+" is active", err)
-	detail, err := doctorRecentBackup(unitPath)
+	detail, err := doctorRecentBackup(BackupDir, unitPath)
 	add("recent_backup", detail, err)
 	return result, nil
 }
@@ -143,30 +143,28 @@ func doctorHostKey(port int) error {
 	return err
 }
 
-// doctorRecentBackup uses the newest SQLite file's mtime, or the unit file's mtime before the first backup.
-func doctorRecentBackup(unitPath string) (string, error) {
-	entries, err := os.ReadDir(BackupDir)
+// doctorRecentBackup checks the newest canonical snapshot in backupDir by its name's
+// timestamp and verifies it, or uses the unit file's mtime before the first backup.
+func doctorRecentBackup(backupDir, unitPath string) (string, error) {
+	entries, err := os.ReadDir(backupDir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 	var newest time.Time
 	var newestPath string
 	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".sqlite") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return "", err
-		}
-		if info.Mode().IsRegular() && (newestPath == "" || info.ModTime().After(newest)) {
-			newest = info.ModTime()
-			newestPath = filepath.Join(BackupDir, entry.Name())
+		taken, ok := snapshotTime(entry.Name())
+		if ok && (newestPath == "" || taken.After(newest)) {
+			newest = taken
+			newestPath = filepath.Join(backupDir, entry.Name())
 		}
 	}
 	if newestPath != "" {
 		if time.Since(newest) >= DoctorBackupMaxAge {
 			return "", fmt.Errorf("last backup %s is at least %s old", newestPath, DoctorBackupMaxAge)
+		}
+		if err := verifySnapshot(newestPath); err != nil {
+			return "", fmt.Errorf("last backup %s does not verify: %w", newestPath, err)
 		}
 		return "recent backup: " + newestPath, nil
 	}
@@ -175,7 +173,7 @@ func doctorRecentBackup(unitPath string) (string, error) {
 		return "", err
 	}
 	if time.Since(info.ModTime()) >= DoctorBackupMaxAge {
-		return "", fmt.Errorf("no backups in %s; installed at least %s ago", BackupDir, DoctorBackupMaxAge)
+		return "", fmt.Errorf("no backups in %s; installed at least %s ago", backupDir, DoctorBackupMaxAge)
 	}
 	return fmt.Sprintf("no backups yet; installed less than %s ago", DoctorBackupMaxAge), nil
 }

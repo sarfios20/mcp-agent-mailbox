@@ -240,3 +240,23 @@ func writeFixtureChecksum(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+// Catches doctor passing on a fresh file that is not a verified backup while the real ones are stale.
+func TestDoctorRecentBackupRequiresAVerifiedSnapshot(t *testing.T) {
+	root := t.TempDir()
+	unit := filepath.Join(root, "unit")
+	if err := os.WriteFile(unit, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * DoctorBackupMaxAge)
+	if err := os.Chtimes(unit, old, old); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(root, "mailbox-"+time.Now().UTC().Format("20060102T150405Z")+".sqlite")
+	if err := os.WriteFile(fake, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if detail, err := doctorRecentBackup(root, unit); err == nil {
+		t.Fatalf("an empty unverified file passed as a recent backup: %s", detail)
+	}
+}
