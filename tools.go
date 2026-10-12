@@ -28,6 +28,19 @@ type replyInput struct {
 	Text     string `json:"text" jsonschema:"Reply text"`
 }
 
+type muteInput struct {
+	ThreadID int64 `json:"thread_id" jsonschema:"ID of the thread to mute"`
+}
+
+type unmuteInput struct {
+	ThreadID int64 `json:"thread_id" jsonschema:"ID of the thread to unmute"`
+}
+
+type muteOutput struct {
+	ThreadID int64 `json:"thread_id" jsonschema:"ID of the thread"`
+	Muted    bool  `json:"muted" jsonschema:"Whether the authenticated participant has muted the thread"`
+}
+
 type addToThreadInput struct {
 	ThreadID int64    `json:"thread_id" jsonschema:"ID of the thread to add participants to"`
 	Names    []string `json:"names" jsonschema:"Participant names to add; wildcard is not supported"`
@@ -51,6 +64,7 @@ type inboxEntryOutput struct {
 	ThreadID     int64    `json:"thread_id"`
 	Subject      string   `json:"subject"`
 	Participants []string `json:"participants"`
+	Muted        bool     `json:"muted"`
 	Unread       int      `json:"unread"`
 	LastAt       string   `json:"last_at"`
 }
@@ -63,6 +77,7 @@ type threadOutput struct {
 	ID           int64           `json:"id"`
 	Subject      string          `json:"subject"`
 	Participants []string        `json:"participants"`
+	Muted        bool            `json:"muted"`
 	Messages     []messageOutput `json:"messages"`
 }
 
@@ -99,7 +114,7 @@ func newMCPServer(store *mailbox.Store, me, publicKey string) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "inbox",
-		Description: "Lists threads with unread receipts for the authenticated participant, including all thread participants.",
+		Description: "Lists threads with unread receipts for the authenticated participant, including all thread participants and the caller's muted state.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, _ inboxInput) (*mcp.CallToolResult, inboxOutput, error) {
 		entries, err := store.Inbox(me)
 		if err != nil {
@@ -111,6 +126,7 @@ func newMCPServer(store *mailbox.Store, me, publicKey string) *mcp.Server {
 				ThreadID:     entry.ThreadID,
 				Subject:      entry.Subject,
 				Participants: entry.Participants,
+				Muted:        entry.Muted,
 				Unread:       entry.Unread,
 				LastAt:       entry.LastAt.Format(time.RFC3339Nano),
 			})
@@ -120,13 +136,33 @@ func newMCPServer(store *mailbox.Store, me, publicKey string) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "read_thread",
-		Description: "Returns a complete thread with its participants and each message’s unread state before this call, then marks only the authenticated participant’s receipts read.",
+		Description: "Returns a complete thread with its participants, the caller's muted state and each message’s unread state before this call, then marks only the authenticated participant’s receipts read.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input readThreadInput) (*mcp.CallToolResult, readThreadOutput, error) {
 		thread, err := store.ReadThread(me, input.ThreadID)
 		if err != nil {
 			return nil, readThreadOutput{}, err
 		}
 		return nil, readThreadOutput{Thread: translateThread(thread)}, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "mute",
+		Description: "Mutes a thread for the authenticated participant, who must belong to the thread. Unread receipts remain available, but do not wake wait. Repeating is not an error.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input muteInput) (*mcp.CallToolResult, muteOutput, error) {
+		if err := store.SetMuted(me, input.ThreadID, true); err != nil {
+			return nil, muteOutput{}, err
+		}
+		return nil, muteOutput{ThreadID: input.ThreadID, Muted: true}, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "unmute",
+		Description: "Unmutes a thread for the authenticated participant, who must belong to the thread. Unread receipts in the thread count toward wait again. Repeating is not an error.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input unmuteInput) (*mcp.CallToolResult, muteOutput, error) {
+		if err := store.SetMuted(me, input.ThreadID, false); err != nil {
+			return nil, muteOutput{}, err
+		}
+		return nil, muteOutput{ThreadID: input.ThreadID, Muted: false}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -190,11 +226,13 @@ func checkSize(field, value string, limit int) error {
 	return nil
 }
 
+// translateThread formats a mailbox thread, including the caller's muted state, for MCP.
 func translateThread(thread mailbox.Thread) threadOutput {
 	out := threadOutput{
 		ID:           thread.ID,
 		Subject:      thread.Subject,
 		Participants: thread.Participants,
+		Muted:        thread.Muted,
 		Messages:     make([]messageOutput, 0, len(thread.Messages)),
 	}
 	for _, message := range thread.Messages {

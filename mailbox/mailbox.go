@@ -39,6 +39,7 @@ type Thread struct {
 	ID           int64
 	Subject      string
 	Participants []string
+	Muted        bool
 	Messages     []Message
 }
 
@@ -47,6 +48,7 @@ type InboxEntry struct {
 	ThreadID     int64
 	Subject      string
 	Participants []string
+	Muted        bool
 	Unread       int
 	LastAt       time.Time
 }
@@ -93,6 +95,7 @@ CREATE TABLE IF NOT EXISTS thread_members (
     thread_id INTEGER REFERENCES threads,
     participant TEXT,
     added_at TEXT,
+    muted INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (thread_id, participant)
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -387,8 +390,39 @@ func (s *Store) Reply(me string, threadID int64, text string, maxThreadBytes int
 	return messageID, nil
 }
 
-// WaitUnread returns the unread receipt count, waiting for committed messages
-// when there are none, until ctx is cancelled. It does not mark receipts read.
+// SetMuted sets the caller's thread membership state, accepting repeated values.
+// Unmuting wakes waiters so existing unread receipts can be counted.
+func (s *Store) SetMuted(me string, threadID int64, muted bool) error {
+	if err := s.validateParticipant(me); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin setting mute state for thread %d as %q: %w", threadID, me, err)
+	}
+	defer tx.Rollback()
+	members, err := threadParticipants(tx, threadID)
+	if err != nil {
+		return err
+	}
+	if err := requireMember(me, threadID, members); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("UPDATE thread_members SET muted = ? WHERE thread_id = ? AND participant = ?", muted, threadID, me); err != nil {
+		return fmt.Errorf("set mute state for thread %d as %q: %w", threadID, me, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mute state for thread %d as %q: %w", threadID, me, err)
+	}
+	if !muted {
+		s.notifyUnread()
+	}
+	return nil
+}
+
+// WaitUnread returns the unread receipt count in unmuted threads, waiting for
+// committed messages or unmuting when there are none, until ctx is cancelled.
+// It does not mark receipts read.
 func (s *Store) WaitUnread(ctx context.Context, me string) (int, error) {
 	if err := s.validateParticipant(me); err != nil {
 		return 0, err
@@ -399,7 +433,10 @@ func (s *Store) WaitUnread(ctx context.Context, me string) (int, error) {
 		s.notifyMu.Unlock()
 
 		var unread int
-		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM receipts WHERE participant = ? AND read_at IS NULL", me).Scan(&unread); err != nil {
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM receipts AS r
+JOIN messages AS m ON m.id = r.message_id
+JOIN thread_members AS tm ON tm.thread_id = m.thread_id AND tm.participant = r.participant
+WHERE r.participant = ? AND r.read_at IS NULL AND tm.muted = 0`, me).Scan(&unread); err != nil {
 			return 0, fmt.Errorf("count unread receipts for %q: %w", me, err)
 		}
 		if unread > 0 {
@@ -413,7 +450,7 @@ func (s *Store) WaitUnread(ctx context.Context, me string) (int, error) {
 	}
 }
 
-// notifyUnread wakes every waiter after a Send or Reply transaction commits.
+// notifyUnread wakes every waiter after a Send, Reply or unmute transaction commits.
 func (s *Store) notifyUnread() {
 	s.notifyMu.Lock()
 	defer s.notifyMu.Unlock()
@@ -492,7 +529,7 @@ SELECT ?, participant FROM thread_members WHERE thread_id = ? AND participant !=
 }
 
 // ReadThread returns a member's thread with Unread reflecting the state before
-// this call, then marks only that member's receipts read.
+// this call and the caller's Muted state, then marks only that member's receipts read.
 func (s *Store) ReadThread(me string, threadID int64) (thread Thread, err error) {
 	if err := s.validateParticipant(me); err != nil {
 		return Thread{}, err
@@ -516,6 +553,9 @@ func (s *Store) ReadThread(me string, threadID int64) (thread Thread, err error)
 	}
 	if err = requireMember(me, threadID, thread.Participants); err != nil {
 		return Thread{}, err
+	}
+	if err = tx.QueryRow("SELECT muted FROM thread_members WHERE thread_id = ? AND participant = ?", threadID, me).Scan(&thread.Muted); err != nil {
+		return Thread{}, fmt.Errorf("look up mute state for thread %d as %q: %w", threadID, me, err)
 	}
 
 	rows, err := tx.Query(`
@@ -560,7 +600,8 @@ WHERE participant = ? AND read_at IS NULL
 	return thread, nil
 }
 
-// Inbox lists threads with messages that me has not read, newest first.
+// Inbox lists threads with messages that me has not read, newest first,
+// including muted threads and the caller's Muted state.
 func (s *Store) Inbox(me string) ([]InboxEntry, error) {
 	if err := s.validateParticipant(me); err != nil {
 		return nil, err
@@ -573,11 +614,12 @@ func (s *Store) Inbox(me string) ([]InboxEntry, error) {
 	defer tx.Rollback()
 	rows, err := tx.Query(`
 SELECT t.id, t.subject, COUNT(r.message_id),
-       (SELECT MAX(created_at) FROM messages WHERE thread_id = t.id)
+       (SELECT MAX(created_at) FROM messages WHERE thread_id = t.id), tm.muted
 FROM threads AS t
 JOIN messages AS m ON m.thread_id = t.id
 JOIN receipts AS r ON r.message_id = m.id AND r.participant = ? AND r.read_at IS NULL
-GROUP BY t.id, t.subject
+JOIN thread_members AS tm ON tm.thread_id = t.id AND tm.participant = r.participant
+GROUP BY t.id, t.subject, tm.muted
 ORDER BY 4 DESC, t.id DESC`, me)
 	if err != nil {
 		return nil, fmt.Errorf("list inbox for %q: %w", me, err)
@@ -588,7 +630,7 @@ ORDER BY 4 DESC, t.id DESC`, me)
 	for rows.Next() {
 		var entry InboxEntry
 		var lastAt string
-		if err := rows.Scan(&entry.ThreadID, &entry.Subject, &entry.Unread, &lastAt); err != nil {
+		if err := rows.Scan(&entry.ThreadID, &entry.Subject, &entry.Unread, &lastAt, &entry.Muted); err != nil {
 			return nil, fmt.Errorf("scan inbox entry for %q: %w", me, err)
 		}
 		entry.LastAt, err = parseTime(lastAt, "created_at", entry.ThreadID)
