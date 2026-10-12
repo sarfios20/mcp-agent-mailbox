@@ -171,6 +171,19 @@ call carol read_thread '{"thread_id":1}' | sc | jq -e '.thread.messages[0] | .co
 call alice reply '{"thread_id":1,"text":"welcome carol"}' >/dev/null
 call carol inbox '{}' | sc | jq -e '.threads[] | select(.thread_id == 1) | .unread == 1' >/dev/null || fail "late member does not get new messages"
 
+# wait: returns at once if something is unread; otherwise blocks until a message arrives.
+timeout 5 bash -c "$(declare -f mbx mbxssh); W='$W' MAILBOX_PORT=$MAILBOX_PORT mbx carol wait </dev/null" | jq -e '.unread >= 1' >/dev/null || fail "wait did not return at once with unread mail"
+call carol read_thread '{"thread_id":1}' >/dev/null
+call carol inbox '{}' | sc | jq -e '.threads | length == 0' >/dev/null || fail "carol still has unread mail before the wait test"
+mbx carol wait </dev/null > "$W/wait.out" 2>&1 & wp=$!; PIDS+=($wp)
+sleep 3
+kill -0 $wp 2>/dev/null || fail "wait returned with nothing unread: $(cat "$W/wait.out")"
+call alice send '{"to":["carol"],"subject":"ping","text":"wake up"}' >/dev/null
+for _ in 1 2 3 4 5 6; do kill -0 $wp 2>/dev/null || break; sleep 0.5; done
+kill -0 $wp 2>/dev/null && fail "wait did not wake within 3 s of a new message"
+wait $wp || fail "wait exited non-zero: $(cat "$W/wait.out")"
+jq -e '.unread == 1' "$W/wait.out" >/dev/null || fail "wait output is not {\"unread\": 1}: $(cat "$W/wait.out")"
+
 call alice send '{"to":[],"subject":"x","text":"x"}' | iserr || fail "empty to accepted"
 call alice send '{"to":["bob","bob"],"subject":"x","text":"x"}' | iserr || fail "duplicate to accepted"
 call alice send '{"to":["alice"],"subject":"x","text":"x"}' | iserr || fail "sending to yourself accepted"
