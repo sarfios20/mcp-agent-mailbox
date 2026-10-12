@@ -264,3 +264,25 @@ func TestRemovedKeyCannotOpenSessions(t *testing.T) {
 		t.Fatal("a removed key opened a session over its old connection")
 	}
 }
+
+// Catches a thread growing past what an SDK client accepts in one read_thread
+// result, which would mark it read and then lose it. Control characters are the
+// worst case for JSON escaping.
+func TestFullThreadStillFitsOneReadThread(t *testing.T) {
+	address, keys, _ := startSSHTestServer(t)
+	alice := connectTestClient(t, address, keys["alice"])
+	bob := connectTestClient(t, address, keys["bob"])
+	text := strings.Repeat("\x01", maxTextBytes)
+	sent := callTool[sendOutput](t, alice, "send", map[string]any{"to": []string{"bob"}, "subject": "s", "text": text})
+	for size := len(text); size+len(text) <= maxThreadBytes; size += len(text) {
+		callTool[replyOutput](t, alice, "reply", map[string]any{"thread_id": sent.ThreadID, "text": text})
+	}
+	result, err := alice.CallTool(context.Background(), &mcp.CallToolParams{Name: "reply", Arguments: map[string]any{"thread_id": sent.ThreadID, "text": text}})
+	if err == nil && !result.IsError {
+		t.Fatalf("reply past %d bytes in a thread was accepted", maxThreadBytes)
+	}
+	thread := callTool[readThreadOutput](t, bob, "read_thread", map[string]any{"thread_id": sent.ThreadID})
+	if len(thread.Thread.Messages) != maxThreadBytes/maxTextBytes {
+		t.Fatalf("read %d messages, want %d", len(thread.Thread.Messages), maxThreadBytes/maxTextBytes)
+	}
+}

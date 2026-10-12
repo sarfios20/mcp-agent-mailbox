@@ -80,8 +80,9 @@ subcommands switch to that user before opening it.
 None accepts the sender: it comes from the SSH key. Errors: empty or
 duplicate `to`, the sender in `to`, unknown names, a non-member reading,
 replying or adding, adding someone already in the thread.
-Size limits in `config.go`, checked in `tools.go`: message text 64 KiB,
-subject 256 bytes.
+Size limits in `config.go`: message text 64 KiB, subject 256 bytes, and
+1 MiB of text per thread (`reply` past it fails: start a new thread), so a
+whole thread always fits in one `read_thread` result an SDK client accepts.
 
 ## SSH server
 

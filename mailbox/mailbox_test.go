@@ -66,7 +66,7 @@ func TestReadThreadMarksOnlyReceivedMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if _, err := store.Reply("bob", threadID, "reply"); err != nil {
+	if _, err := store.Reply("bob", threadID, "reply", 1<<20); err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestNonParticipantCannotReadOrReply(t *testing.T) {
 	if _, err := store.ReadThread("carol", threadID); err == nil {
 		t.Error("ReadThread by non-participant succeeded")
 	}
-	if _, err := store.Reply("carol", threadID, "intrusion"); err == nil {
+	if _, err := store.Reply("carol", threadID, "intrusion", 1<<20); err == nil {
 		t.Error("Reply by non-participant succeeded")
 	}
 }
@@ -168,7 +168,7 @@ func TestGroupReplyReceipts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	messageID, err := store.Reply("bob", threadID, "reply to both")
+	messageID, err := store.Reply("bob", threadID, "reply to both", 1<<20)
 	if err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestAddToThreadLateMemberReceipts(t *testing.T) {
 	if len(thread.Messages) != 1 || thread.Messages[0].Content != "hello bob" || thread.Messages[0].Unread {
 		t.Fatalf("old messages = %+v, want the old message with Unread false", thread.Messages)
 	}
-	messageID, err := store.Reply("alice", threadID, "welcome carol")
+	messageID, err := store.Reply("alice", threadID, "welcome carol", 1<<20)
 	if err != nil {
 		t.Fatalf("Reply: %v", err)
 	}

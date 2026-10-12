@@ -265,7 +265,8 @@ func (s *Store) Send(me string, to []string, subject, text string) (threadID int
 }
 
 // Reply appends a message with unread receipts for every other thread member.
-func (s *Store) Reply(me string, threadID int64, text string) (messageID int64, err error) {
+// It fails once the thread's texts would exceed maxThreadBytes in total.
+func (s *Store) Reply(me string, threadID int64, text string, maxThreadBytes int) (messageID int64, err error) {
 	if err := s.validateParticipant(me); err != nil {
 		return 0, err
 	}
@@ -283,6 +284,13 @@ func (s *Store) Reply(me string, threadID int64, text string) (messageID int64, 
 	}
 	if err := requireMember(me, threadID, members); err != nil {
 		return 0, err
+	}
+	var size int
+	if err := tx.QueryRow("SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM messages WHERE thread_id = ?", threadID).Scan(&size); err != nil {
+		return 0, fmt.Errorf("measure thread %d: %w", threadID, err)
+	}
+	if size+len(text) > maxThreadBytes {
+		return 0, fmt.Errorf("thread %d holds %d bytes and the limit is %d; start a new thread", threadID, size, maxThreadBytes)
 	}
 	messageID, err = insertMessage(tx, me, threadID, text, time.Now().UTC().Format(timeLayout))
 	if err != nil {

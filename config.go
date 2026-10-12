@@ -21,4 +21,8 @@ const (
 	maxTextBytes = 64 << 10
 	// maxSubjectBytes caps a thread subject.
 	maxSubjectBytes = 256
+	// maxThreadBytes caps the texts of one thread together. read_thread returns the
+	// whole thread twice (structured and text) with JSON escaping, and SDK clients
+	// reject responses over 16 MiB.
+	maxThreadBytes = 1 << 20
 )

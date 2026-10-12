@@ -136,7 +136,7 @@ func newMCPServer(store *mailbox.Store, me, publicKey string) *mcp.Server {
 		if err := checkSize("text", input.Text, maxTextBytes); err != nil {
 			return nil, replyOutput{}, err
 		}
-		messageID, err := store.Reply(me, input.ThreadID, input.Text)
+		messageID, err := store.Reply(me, input.ThreadID, input.Text, maxThreadBytes)
 		if err != nil {
 			return nil, replyOutput{}, err
 		}
