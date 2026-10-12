@@ -88,6 +88,7 @@ if [ "${E2E_VIA_INSTALL_SH:-0}" = 1 ]; then
   cp "$W/mcp-agent-mailbox" "$W/release/mcp-agent-mailbox-linux-amd64"
   cp "$REPO/install.sh" "$W/release/install.sh"
   (cd "$W/release" && sha256sum mcp-agent-mailbox-linux-amd64 > SHA256SUMS)
+  ss -ltnH "sport = :$HTTP_PORT" | grep -q . && fail "port $HTTP_PORT is taken; another server would answer install.sh"
   python3 -m http.server -b 127.0.0.1 -d "$W/release" "$HTTP_PORT" >/dev/null 2>&1 & PIDS+=($!)
   sleep 1
   vm "curl -fsSL http://10.0.2.2:$HTTP_PORT/install.sh | sudo env MCP_AGENT_MAILBOX_BASE_URL=http://10.0.2.2:$HTTP_PORT sh" > "$W/installsh.out" \
