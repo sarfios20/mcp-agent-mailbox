@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 )
 
 //go:embed units/*
@@ -99,7 +101,44 @@ func Install(port int) (any, error) {
 			return nil, err
 		}
 	}
+	if err := waitServing(port); err != nil {
+		return nil, err
+	}
 	return map[string]any{"installed": true, "port": port, "binary": BinaryPath, "data_dir": DataDir, "backup_dir": BackupDir}, nil
+}
+
+// waitServing returns once the server has recorded port in server.json and presents
+// the stored host key there, so doctor passes right after install. Fails after StartTimeout.
+func waitServing(port int) error {
+	deadline := time.Now().Add(StartTimeout)
+	for {
+		err := servingOn(port)
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("server did not answer on port %d within %s (see journalctl -u %s): %w", port, StartTimeout, ServiceName, err)
+		}
+		time.Sleep(StartPollInterval)
+	}
+}
+
+// servingOn checks one time that server.json names port and the host key matches there.
+func servingOn(port int) error {
+	data, err := os.ReadFile(filepath.Join(DataDir, "server.json"))
+	if err != nil {
+		return err
+	}
+	var config struct {
+		Port int `json:"port"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return err
+	}
+	if config.Port != port {
+		return fmt.Errorf("server.json has port %d, want %d", config.Port, port)
+	}
+	return doctorHostKey(port)
 }
 
 // Uninstall removes the three managed units while preserving the mailbox user, data and backups.

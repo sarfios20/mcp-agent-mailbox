@@ -41,4 +41,8 @@ const (
 	DoctorBackupMaxAge = 48 * time.Hour
 	// DoctorSSHTimeout bounds connection and handshake time for the host key check.
 	DoctorSSHTimeout = 3 * time.Second
+	// StartTimeout bounds how long install waits for the started server to answer SSH.
+	StartTimeout = 10 * time.Second
+	// StartPollInterval is the pause between install's checks that the server answers.
+	StartPollInterval = 100 * time.Millisecond
 )
