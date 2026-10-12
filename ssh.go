@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -119,13 +120,18 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 		defer cancel()
 		finished := make(chan error, 1)
 		started := false
+		execCommand := ""
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case err := <-finished:
 				if err != nil {
-					refuseChannel(channel, "MCP session failed")
+					if execCommand == "wait" {
+						refuseChannel(channel, "wait failed")
+					} else {
+						refuseChannel(channel, "MCP session failed")
+					}
 					return
 				}
 				exitChannel(channel, 0)
@@ -136,18 +142,29 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 				}
 				if request.Type != "exec" || started {
 					_ = request.Reply(false, nil)
-					refuseChannel(channel, "only an mcp exec request is allowed")
+					refuseChannel(channel, "only an mcp or wait exec request is allowed")
 					return
 				}
 				var command struct{ Command string }
-				if ssh.Unmarshal(request.Payload, &command) != nil || command.Command != "mcp" {
+				if ssh.Unmarshal(request.Payload, &command) != nil || (command.Command != "mcp" && command.Command != "wait") {
 					_ = request.Reply(true, nil)
-					refuseChannel(channel, "unknown command: only mcp is supported")
+					refuseChannel(channel, "unknown command: only mcp and wait are supported")
 					return
 				}
 				started = true
+				execCommand = command.Command
 				_ = request.Reply(true, nil)
 				go func() {
+					if command.Command == "wait" {
+						unread, err := store.WaitUnread(sessionCtx, name)
+						if err == nil {
+							err = json.NewEncoder(channel).Encode(struct {
+								Unread int `json:"unread"`
+							}{Unread: unread})
+						}
+						finished <- err
+						return
+					}
 					finished <- newMCPServer(store, name).Run(sessionCtx, &mcp.IOTransport{Reader: io.NopCloser(channel), Writer: nopCloser{channel}})
 				}()
 			}

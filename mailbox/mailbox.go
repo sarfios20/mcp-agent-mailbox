@@ -2,11 +2,13 @@
 package mailbox
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -18,7 +20,9 @@ const timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 
 // Store is a SQLite-backed mailbox with persisted participants.
 type Store struct {
-	db *sql.DB
+	db       *sql.DB
+	notifyMu sync.Mutex
+	notify   chan struct{}
 }
 
 // Message is one message in a thread.
@@ -103,7 +107,7 @@ CREATE TABLE IF NOT EXISTS receipts (
 		return nil, fmt.Errorf("create schema in database %q: %w", path, err)
 	}
 
-	return &Store{db: db}, nil
+	return &Store{db: db, notify: make(chan struct{})}, nil
 }
 
 // Close releases the database used by the store.
@@ -256,6 +260,7 @@ func (s *Store) Send(me string, to []string, subject, text string) (threadID int
 	if err = tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit thread %d from %q to %q: %w", threadID, me, to, err)
 	}
+	s.notifyUnread()
 	return threadID, nil
 }
 
@@ -286,7 +291,42 @@ func (s *Store) Reply(me string, threadID int64, text string) (messageID int64, 
 	if err = tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit reply to thread %d as %q: %w", threadID, me, err)
 	}
+	s.notifyUnread()
 	return messageID, nil
+}
+
+// WaitUnread returns the unread receipt count, waiting for committed messages
+// when there are none, until ctx is cancelled. It does not mark receipts read.
+func (s *Store) WaitUnread(ctx context.Context, me string) (int, error) {
+	if err := s.validateParticipant(me); err != nil {
+		return 0, err
+	}
+	for {
+		s.notifyMu.Lock()
+		notify := s.notify
+		s.notifyMu.Unlock()
+
+		var unread int
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM receipts WHERE participant = ? AND read_at IS NULL", me).Scan(&unread); err != nil {
+			return 0, fmt.Errorf("count unread receipts for %q: %w", me, err)
+		}
+		if unread > 0 {
+			return unread, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-notify:
+		}
+	}
+}
+
+// notifyUnread wakes every waiter after a Send or Reply transaction commits.
+func (s *Store) notifyUnread() {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	close(s.notify)
+	s.notify = make(chan struct{})
 }
 
 // AddToThread lets a member add named participants and returns all members sorted.

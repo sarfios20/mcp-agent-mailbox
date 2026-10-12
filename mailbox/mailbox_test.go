@@ -1,8 +1,10 @@
 package mailbox
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -23,6 +25,38 @@ func openTestStore(t *testing.T) *Store {
 		}
 	})
 	return store
+}
+
+// Catches waiting with no unread receipts returning early or failing to wake after Send.
+func TestWaitUnreadWakesAfterSend(t *testing.T) {
+	store := openTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		unread int
+		err    error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		unread, err := store.WaitUnread(ctx, "bob")
+		finished <- result{unread: unread, err: err}
+	}()
+	select {
+	case got := <-finished:
+		t.Fatalf("WaitUnread returned with nothing unread: count=%d, error=%v", got.unread, got.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if _, err := store.Send("alice", []string{"bob"}, "status", "wake up"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case got := <-finished:
+		if got.err != nil || got.unread != 1 {
+			t.Fatalf("WaitUnread = (%d, %v), want (1, nil)", got.unread, got.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("WaitUnread did not wake after Send")
+	}
 }
 
 // Catches reporting unread after marking receipts, or leaving received messages unread.

@@ -26,10 +26,10 @@ func TestAuthenticationRejectsUnknownKey(t *testing.T) {
 }
 
 // Catches forbidden exec commands being accepted as MCP sessions.
-func TestRejectsCommandsOtherThanMCP(t *testing.T) {
+func TestRejectsUnknownCommands(t *testing.T) {
 	address, keys, _ := startSSHTestServer(t)
 	client := dialSSHTestClient(t, address, keys["alice"])
-	for _, command := range []string{"ls", "wait", "mcp extra", ""} {
+	for _, command := range []string{"ls", "mcp extra", "wait extra", ""} {
 		t.Run(command, func(t *testing.T) {
 			session, err := client.NewSession()
 			if err != nil {
