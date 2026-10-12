@@ -8,6 +8,10 @@
 # on 127.0.0.1. The cloud image is cached in ~/.cache/mcp-agent-mailbox-e2e.
 # Needs: qemu-system-x86_64, qemu-img, genisoimage, curl, jq, ssh, go.
 # Prints PASS on success; exits non-zero on the first failed check.
+#
+# E2E_VIA_INSTALL_SH=1 installs through install.sh instead of copying the
+# binary: the host serves install.sh, the binary and SHA256SUMS (laid out like
+# a GitHub Release) on 127.0.0.1:$E2E_HTTP_PORT, which the VM sees as 10.0.2.2.
 set -euo pipefail
 
 STAGE=${1:?usage: test/e2e.sh install|add|doctor|backup}
@@ -17,6 +21,7 @@ case $STAGE in install) LEVEL=1 ;; add) LEVEL=2 ;; doctor) LEVEL=3 ;; backup) LE
 IMAGE_URL=https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
 CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/mcp-agent-mailbox-e2e
 SSH_PORT=${E2E_SSH_PORT:-2222}
+HTTP_PORT=${E2E_HTTP_PORT:-18800}
 TUNNEL_A=18801
 TUNNEL_B=18802
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -63,8 +68,24 @@ qemu-system-x86_64 -enable-kvm -cpu host -m 1024 -smp 2 -display none \
 for _ in $(seq 90); do vm true 2>/dev/null && break; sleep 2; done
 vm true || fail "VM did not come up (console: $W/console.log)"
 vm 'cloud-init status --wait >/dev/null; command -v curl >/dev/null && command -v sqlite3 >/dev/null || (sudo apt-get -qq update && sudo apt-get -qq install -y curl sqlite3 >/dev/null)'
-scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -P "$SSH_PORT" -i "$W/admin" -q "$W/mcp-agent-mailbox" debian@127.0.0.1:
-vm 'sudo install -m755 mcp-agent-mailbox /usr/local/bin/mcp-agent-mailbox'
+if [ "${E2E_VIA_INSTALL_SH:-0}" = 1 ]; then
+  step "install.sh"
+  mkdir "$W/release"
+  cp "$W/mcp-agent-mailbox" "$W/release/mcp-agent-mailbox-linux-amd64"
+  cp "$REPO/install.sh" "$W/release/install.sh"
+  (cd "$W/release" && sha256sum mcp-agent-mailbox-linux-amd64 > SHA256SUMS)
+  python3 -m http.server -b 127.0.0.1 -d "$W/release" "$HTTP_PORT" >/dev/null 2>&1 & PIDS+=($!)
+  sleep 1
+  vm "curl -fsSL http://10.0.2.2:$HTTP_PORT/install.sh | sudo env MCP_AGENT_MAILBOX_BASE_URL=http://10.0.2.2:$HTTP_PORT sh" > "$W/installsh.out" \
+    || fail "install.sh failed: $(cat "$W/installsh.out")"
+  tail -1 "$W/installsh.out" | jq -e '.installed' >/dev/null || fail "install.sh did not end with install's JSON"
+  echo corrupted >> "$W/release/mcp-agent-mailbox-linux-amd64"
+  vm "curl -fsSL http://10.0.2.2:$HTTP_PORT/install.sh | sudo env MCP_AGENT_MAILBOX_BASE_URL=http://10.0.2.2:$HTTP_PORT sh" >/dev/null 2>&1 \
+    && fail "install.sh accepted a binary with a wrong checksum"
+else
+  scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -P "$SSH_PORT" -i "$W/admin" -q "$W/mcp-agent-mailbox" debian@127.0.0.1:
+  vm 'sudo install -m755 mcp-agent-mailbox /usr/local/bin/mcp-agent-mailbox'
+fi
 
 # ---------------------------------------------------------------- install
 step "install"
