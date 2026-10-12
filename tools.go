@@ -81,9 +81,20 @@ type sendOutput struct {
 	ThreadID int64 `json:"thread_id" jsonschema:"ID of the created thread"`
 }
 
-// newMCPServer binds all tools to the participant authenticated by SSH.
-func newMCPServer(store *mailbox.Store, me string) *mcp.Server {
+// newMCPServer binds all tools to the participant authenticated by SSH with publicKey.
+// Every tool call first checks that publicKey still belongs to me.
+func newMCPServer(store *mailbox.Store, me, publicKey string) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "mcp-agent-mailbox", Version: serverVersion}, nil)
+	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/call" {
+				if err := stillRegistered(store, me, publicKey); err != nil {
+					return nil, err
+				}
+			}
+			return next(ctx, method, req)
+		}
+	})
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "inbox",

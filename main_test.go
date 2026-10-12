@@ -215,3 +215,22 @@ func TestHandshakeTimeoutClosesSilentConnectionsOnly(t *testing.T) {
 		t.Fatalf("authenticated connection closed by the handshake timer: %v", err)
 	}
 }
+
+// Catches a session opened before remove still acting as the name after it
+// was given to a new key.
+func TestSessionStopsWhenItsKeyIsReplaced(t *testing.T) {
+	address, keys, store := startSSHTestServer(t)
+	alice := connectTestClient(t, address, keys["alice"])
+	if _, err := store.RemoveParticipant("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddParticipant("alice", strings.TrimSpace(string(ssh.MarshalAuthorizedKey(testSigner(t).PublicKey())))); err != nil {
+		t.Fatal(err)
+	}
+	result, err := alice.CallTool(context.Background(), &mcp.CallToolParams{Name: "send", Arguments: map[string]any{
+		"to": []string{"bob"}, "subject": "old key", "text": "still here",
+	}})
+	if err == nil && !result.IsError {
+		t.Fatal("send over a session whose key was replaced was accepted")
+	}
+}

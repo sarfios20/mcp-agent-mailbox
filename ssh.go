@@ -26,6 +26,7 @@ import (
 
 type participantContextKey struct{}
 type handshakeTimerContextKey struct{}
+type publicKeyContextKey struct{}
 
 type authWindow struct {
 	started  time.Time
@@ -86,15 +87,18 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 		if window.failures >= authFailuresPerMinute {
 			return false
 		}
-		name, ok, err := store.ParticipantByKey(strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+		publicKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
+		name, ok, err := store.ParticipantByKey(publicKey)
 		if !validSSHKey(key) || err != nil || !ok {
 			return false
 		}
 		ctx.SetValue(participantContextKey{}, name)
+		ctx.SetValue(publicKeyContextKey{}, publicKey)
 		return true
 	}
 	server.ChannelHandlers = map[string]gliderssh.ChannelHandler{"session": func(_ *gliderssh.Server, _ *ssh.ServerConn, incoming ssh.NewChannel, ctx gliderssh.Context) {
 		name, _ := ctx.Value(participantContextKey{}).(string)
+		publicKey, _ := ctx.Value(publicKeyContextKey{}).(string)
 		mu.Lock()
 		if sessions[name] >= sessionsPerParticipant {
 			mu.Unlock()
@@ -158,6 +162,9 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 					if command.Command == "wait" {
 						unread, err := store.WaitUnread(sessionCtx, name)
 						if err == nil {
+							err = stillRegistered(store, name, publicKey)
+						}
+						if err == nil {
 							err = json.NewEncoder(channel).Encode(struct {
 								Unread int `json:"unread"`
 							}{Unread: unread})
@@ -165,7 +172,7 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 						finished <- err
 						return
 					}
-					finished <- newMCPServer(store, name).Run(sessionCtx, &mcp.IOTransport{Reader: io.NopCloser(channel), Writer: nopCloser{channel}})
+					finished <- newMCPServer(store, name, publicKey).Run(sessionCtx, &mcp.IOTransport{Reader: io.NopCloser(channel), Writer: nopCloser{channel}})
 				}()
 			}
 		}
@@ -202,6 +209,19 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 		return conn
 	}
 	return server, nil
+}
+
+// stillRegistered fails once publicKey no longer belongs to name, so a connection
+// opened before remove (or before the name got another key) cannot keep acting as name.
+func stillRegistered(store *mailbox.Store, name, publicKey string) error {
+	owner, ok, err := store.ParticipantByKey(publicKey)
+	if err != nil {
+		return err
+	}
+	if !ok || owner != name {
+		return fmt.Errorf("the key of %s is no longer registered", name)
+	}
+	return nil
 }
 
 // validSSHKey limits authentication to the supported key types and RSA sizes.
