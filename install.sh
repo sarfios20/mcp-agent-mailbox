@@ -24,15 +24,14 @@ curl -fsSL "$BASE_URL/$binary" -o "$workdir/$binary"
 curl -fsSL "$BASE_URL/SHA256SUMS" -o "$workdir/SHA256SUMS"
 cd "$workdir"
 
-if ! awk -v binary="$binary" '
-    $2 == binary || $2 == "*" binary { found = 1 }
-    END { exit !found }
-' SHA256SUMS; then
-    echo "Checksum verification failed: $binary is missing from SHA256SUMS." >&2
-    exit 1
-fi
-if ! sha256sum --check --ignore-missing SHA256SUMS >&2; then
-    echo "Checksum verification failed for $binary." >&2
+# Exactly one SHA256SUMS line must name the binary, and its digest must match.
+expected=$(awk -v binary="$binary" '
+    $2 == binary || $2 == "*" binary { count++; digest = $1 }
+    END { if (count == 1) print digest }
+' SHA256SUMS)
+actual=$(sha256sum "$binary" | cut -d ' ' -f 1)
+if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+    echo "Checksum verification failed for $binary: SHA256SUMS has '$expected', the download is $actual." >&2
     exit 1
 fi
 
