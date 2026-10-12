@@ -108,7 +108,8 @@ failure prints `{"error": "...", "detail": ...}` on stderr. Exit 0 ok, 1 failed,
 `backup`.
 
 - `serve [--data DIR] [--port N]`: the server. Creates the host key and
-  database if missing, writes `server.json`.
+  database if missing, writes `server.json`. Refuses a data directory that
+  group or others can access.
 - `install [--port N]`: root and systemd required (else the error says to run
   `serve` by hand). Fails naming the process if the port is taken. System user
   `mailbox`, data directory owned by it, backups in

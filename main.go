@@ -118,6 +118,14 @@ func serve(dataDir string, port int) error {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return err
 	}
+	// MkdirAll keeps an existing directory's mode, and SQLite creates files 0644 under a usual umask.
+	info, err := os.Stat(dataDir)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return fmt.Errorf("data directory %s has mode %04o; other users could read the mailbox, chmod 700 it", dataDir, info.Mode().Perm())
+	}
 	if err := admin.BecomeDataOwner(dataDir); err != nil {
 		return err
 	}
