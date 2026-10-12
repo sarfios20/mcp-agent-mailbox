@@ -1,7 +1,8 @@
 # Contract
 
 What no task reopens. Starting point: the private `agentes-coordinados`
-server, already working, published here without history and in English.
+server, published here without history and in English, then moved from SSH
+tunnels to its own SSH server.
 
 ## Language
 
@@ -13,20 +14,24 @@ except the copyright line in `LICENSE`.
 
 - Go 1.27, module `github.com/sarfios20/mcp-agent-mailbox`, one static binary
   `mcp-agent-mailbox` built with `CGO_ENABLED=0`. No Docker.
-- MCP: `github.com/modelcontextprotocol/go-sdk` v1.8.0, streamable HTTP,
-  `Stateless: true`, `JSONResponse: true`, path `/mcp`.
+- Transport: the binary's own SSH server, `github.com/gliderlabs/ssh` over
+  `golang.org/x/crypto/ssh`. MCP runs over the stdio of an SSH exec channel
+  (`github.com/modelcontextprotocol/go-sdk` v1.8.0, IO transport). No HTTP.
 - SQLite via `database/sql` + `modernc.org/sqlite`, WAL, no ORM.
-- Supported servers: Debian 12+ / Ubuntu 22.04+, systemd, OpenSSH, amd64 and
-  arm64. Anything else fails at `install` naming the detected OS.
+- Runs on any OS Go builds for. `install` needs Linux with systemd; without
+  it, `serve` is started by hand or any supervisor. Releases: linux amd64 and
+  arm64.
 
 ## Files
 
 | File | Responsibility |
 |---|---|
-| `mailbox/mailbox.go` | Schema and all mailbox operations. Knows nothing of MCP, HTTP or the OS. |
-| `config.go` | Every tunable value, together and commented. Reads and validates the environment. |
-| `main.go` | Subcommand dispatch, bearer auth and the four MCP tools. |
-| `admin/` | `install`, `add`, `remove`, `doctor`, `backup`, `uninstall`. Embeds systemd units and the sshd drop-in with `go:embed`. |
+| `mailbox/mailbox.go` | Schema and all mailbox operations, participants included. Knows nothing of MCP, SSH or the OS. |
+| `config.go` | Every tunable value, together and commented. |
+| `main.go` | Subcommand dispatch and the JSON output convention. |
+| `tools.go` | The MCP tools. Translates between MCP and `mailbox`. |
+| `ssh.go` | SSH server: host key, key auth, exec routing, limits. |
+| `admin/` | `install`, `add`, `remove`, `doctor`, `backup`, `uninstall`. Embeds systemd units with `go:embed`. |
 | `install.sh` | Downloads the release binary, checks SHA256, runs `install`. Nothing else. |
 | `client/inbox.md`, `client/codex-inbox/SKILL.md` | `/inbox` for Claude Code and Codex. Both apply the trust file. |
 | `README.md` | For humans and their agents: what it is, how it works, setup, trust, operations. An agent can install from it alone. |
@@ -35,19 +40,31 @@ except the copyright line in `LICENSE`.
 ## Data and states
 
 ```sql
+participants(name, public_key, added_at)          -- PK name, public_key UNIQUE
 threads(id, subject, created_by, created_at)
 thread_members(thread_id, participant, added_at)  -- PK (thread_id, participant)
 messages(id, thread_id, sender, content, created_at)
 receipts(message_id, participant, read_at NULL)   -- PK (message_id, participant)
 ```
 
-- RFC 3339 UTC, set by the server. No migration from the two-party schema.
+- RFC 3339 UTC, set by the server. No migrations: there are no installs yet.
+- Names match `^[a-z][a-z0-9-]{0,31}$`. A public key belongs to one
+  participant at most. `public_key` is the authorized_keys form
+  (`type base64`), without comment.
 - A thread has 2 or more members. Members are only ever added, never removed.
 - A new message gets one receipt per member except its sender, at insert time.
 - A receipt is `unread` (`read_at IS NULL`) → `read`, only when its
   participant calls `read_thread`. One member reading never affects another.
 - A member added later sees the whole history and gets receipts for messages
   sent after joining only.
+- Removing a participant deletes their `participants` row only. Their
+  messages, memberships and receipts stay.
+
+The data directory (default `/var/lib/mcp-agent-mailbox`) holds `mailbox.db`,
+`host_ed25519_key` (created on first `serve`, never replaced) and
+`server.json` (`{"port": N}`, written by `serve` at start). Every process that
+opens `mailbox.db` runs as the owner of the data directory: run as root, admin
+subcommands switch to that user before opening it.
 
 ## MCP tools
 
@@ -60,60 +77,57 @@ receipts(message_id, participant, read_at NULL)   -- PK (message_id, participant
 - `add_to_thread(thread_id, names)`: any member adds participants.
 - `participants()`: every participant name.
 
-None accepts the sender: it comes from the token. Errors: empty or duplicate
-`to`, the sender in `to`, unknown names, a non-member reading, replying or
-adding, adding someone already in the thread.
+None accepts the sender: it comes from the SSH key. Errors: empty or
+duplicate `to`, the sender in `to`, unknown names, a non-member reading,
+replying or adding, adding someone already in the thread.
 
-## Identity
+## SSH server
 
-- Tokens file is JSON `{"name": "token"}`, 256-bit hex tokens. It may be empty:
-  the server then starts and answers 401 to everything.
-- Names match `^[a-z][a-z0-9-]{0,31}$`.
-- No token or unknown token: 401. The token fixes `from`.
+- Listens on all interfaces, default port 2222. The SSH user name is ignored:
+  the public key alone identifies the participant. Unknown keys are refused.
+- Only public key auth. Key types: ed25519, ecdsa, rsa of 2048 bits or more.
+- Only `session` channels with an `exec` request are accepted. Commands:
+  - `mcp`: an MCP session over the channel's stdin/stdout as that participant.
+  - `wait`: blocks until the participant has unread receipts, prints
+    `{"unread": n}` and exits 0. Woken in-process when a message is stored.
+  - Anything else, no command, shell, pty, subsystems, env, port or agent
+    forwarding: refused, exit status 1 and a one-line reason on stderr.
+- Limits in `config.go`: failed auth attempts per IP per minute, concurrent
+  sessions per participant, handshake timeout, server keepalive interval.
 
 ## CLI
 
 Every subcommand is non-interactive, prints one JSON object on stdout, and on
 failure prints `{"error": "...", "detail": ...}` on stderr. Exit 0 ok, 1 failed,
-2 bad usage. All except `serve` require root and are idempotent.
+2 bad usage. Admin subcommands are idempotent. `--data <dir>` (default
+`/var/lib/mcp-agent-mailbox`) is accepted by `serve`, `add`, `remove` and
+`backup`.
 
-- `serve`: the server. Config from `MAILBOX_DB`, `MAILBOX_TOKENS_FILE`,
-  `MAILBOX_ADDR` (must be loopback).
-- `install [--port N]` (default 8765): system user `mailbox`, data in
-  `/var/lib/mcp-agent-mailbox`, config in `/etc/mcp-agent-mailbox`
-  (`tokens.json`, `config.json` with the port), backups in
-  `/var/backups/mcp-agent-mailbox`, units `mcp-agent-mailbox.service`,
-  `mcp-agent-mailbox-backup.service` and `.timer`, enabled and started.
-  Copies itself to `/usr/local/bin/mcp-agent-mailbox`. Fails naming the process if the port
-  is taken.
-- `add <name> --pubkey <file|-> --host <ssh-host>`: Unix user `mailbox-<name>`
-  in group `mailbox-tunnel`, `authorized_keys` with
-  `restrict,port-forwarding,permitopen="127.0.0.1:<port>"`, new token, service
-  restart. Same name and key again returns the same token. Output keys:
-  `name`, `token`, `ssh_user`, and `client` with ready-to-paste strings
-  `ssh_config`, `tunnel_systemd`, `tunnel_launchd`, `tunnel_windows`,
-  `claude_code`, `codex_toml`.
-- `remove <name>`: deletes the token and the Unix user. Keeps messages.
+- `serve [--data DIR] [--port N]`: the server. Creates the host key and
+  database if missing, writes `server.json`.
+- `install [--port N]`: root and systemd required (else the error says to run
+  `serve` by hand). Fails naming the process if the port is taken. System user
+  `mailbox`, data directory owned by it, backups in
+  `/var/backups/mcp-agent-mailbox` owned by it, units
+  `mcp-agent-mailbox.service`, `mcp-agent-mailbox-backup.service` and `.timer`
+  (both services run as `mailbox`), enabled and started. Copies itself to
+  `/usr/local/bin/mcp-agent-mailbox`.
+- `add <name> --pubkey <file|-> --host <host>`: registers the key. Same name
+  and key again changes nothing. Name or key already used otherwise: error.
+  Output: `name`, and `client` with ready-to-paste strings `known_hosts` (the
+  line for `[host]:port`), `claude_code` (the `claude mcp add` command),
+  `codex_toml`, `wait` (the `ssh ... wait` command). Client commands use
+  `ssh -p <port> -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@<host>`.
+- `remove <name>`: deletes the participant. Output `{"removed": bool, "name"}`.
 - `doctor`: prints `{"ok": bool, "checks": [{"name", "pass", "detail"}]}` on
   stdout and exits 1 if any check fails (the one exception to the error
-  convention). Checks: service active, listening on loopback only, 401
-  without token, sshd drop-in present and `sshd -t` valid, backup timer
-  active, last backup younger than 48 h (or none yet and installed less than
-  48 h ago).
-- `backup`: Go port of `buzon-backup.py`, same retention (3 days, 2 weeks,
-  12 months, 1 year), never deletes unverified files.
-- `uninstall`: stops and removes units, tunnel users, group `mailbox-tunnel`
-  and the drop-in. Keeps the `mailbox` system user, data, config and backups,
-  and says where they are.
-
-## SSH safety
-
-The server never opens a port. Access is only through SSH tunnels. `install`
-adds one drop-in, `/etc/ssh/sshd_config.d/10-mcp-agent-mailbox.conf`, matching
-`Group mailbox-tunnel`, and never edits `sshd_config`. It fails if
-`sshd_config` does not include `sshd_config.d`. It runs `sshd -t` before
-reloading; on failure it removes its drop-in and does not reload. `add` never
-touches sshd config.
+  convention). Checks: service active, port listening, SSH handshake on
+  localhost presents the stored host key, backup timer active, last backup
+  younger than 48 h (or none yet and installed less than 48 h ago).
+- `backup`: verified SQLite snapshot, retention 3 days, 2 weeks, 12 months,
+  1 year, never deletes unverified files.
+- `uninstall`: stops and removes the units. Keeps the `mailbox` user, data and
+  backups, and says where they are.
 
 ## Trust
 
@@ -133,23 +147,23 @@ prompt-injected. The server does not read it.
 ## Release
 
 CI on every push: `go test ./...`, `go vet ./...`. On tag `v*`: binaries for
-linux amd64 and arm64 plus `SHA256SUMS` attached to a GitHub Release.
+linux amd64 and arm64, `SHA256SUMS` and `install.sh` attached to a GitHub
+Release.
 
 ## Tasks
 
+Done: 1 clean copy, 2 English, 3a-3d admin subcommands, 4 releases, 6 N-member
+threads, 7 `add_to_thread` (all on the tunnel design).
+
 | # | Files | Verification | Who |
 |---|---|---|---|
-| 1 | Clean copy of the private repo, `LICENSE` | `grep -rniE --exclude=LICENSE --exclude=CONTRACT.md --exclude-dir=.git '<private names>' .` finds nothing, `go test ./...` | me |
-| 2 | `*.go`, `mailbox/`, `go.mod` | `go test ./...` green; no Spanish left in `*.go` | codex |
-| 3a | `main.go`, `config.go`, `admin/` (install, uninstall, units, drop-in), old `deploy/` units | `test/e2e.sh install` | codex |
-| 3b | `admin/` (add, remove) | `test/e2e.sh add` | codex |
-| 3c | `admin/` (doctor) | `test/e2e.sh doctor` | codex |
-| 3d | `admin/` (backup), drop `deploy/*.py` | `test/e2e.sh backup` and retention unit tests ported from Python | codex |
-| 4 | `install.sh`, `.github/workflows/` | tag on a fork produces the Release; `install.sh` installs it in the e2e VM | codex |
-| 6 | `mailbox/`, `main.go`, `main_test.go` | N members, `*`, `participants`: `go test ./...`, `test/e2e.sh add` | codex |
-| 7 | same | `add_to_thread`: `go test ./...`, `test/e2e.sh add` | codex |
-| 5 | `client/`, `README.md` | a fresh `claude -p` given only the README installs in the e2e VM and exchanges a message | me, prose shown first |
+| 8 | `main.go`, `tools.go`, `ssh.go`, `config.go`, `main_test.go`, `mailbox/`, `admin/` (add, remove, install unit), `go.mod`, `go.sum` | `test/e2e.sh add`, `go test ./...` | codex |
+| 9 | `admin/` (drop sshd drop-in, tunnel users, OS check, `/etc` config; doctor, uninstall, backup as `mailbox`) | `test/e2e.sh backup`, `go test ./...` | codex |
+| 10 | `ssh.go`, `mailbox/` (`wait`) | `test/e2e.sh backup` with the wait checks | codex |
+| 11 | `client/`, `README.md` | a fresh `claude -p` given only the README installs in the e2e VM and exchanges a message | me, prose shown first |
 
 ## Out
 
-Docker, public HTTPS without tunnel, web UI, removing thread members, participant descriptions, pagination, notifications, MCP registry listing, project domain.
+Invite/join flow, Docker, HTTPS, Codex wait loop, web UI, removing thread
+members, participant descriptions, pagination, MCP registry listing, project
+domain.
