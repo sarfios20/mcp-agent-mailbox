@@ -29,8 +29,7 @@ except the copyright line in `LICENSE`.
 | `admin/` | `install`, `add`, `remove`, `doctor`, `backup`, `uninstall`. Embeds systemd units and the sshd drop-in with `go:embed`. |
 | `install.sh` | Downloads the release binary, checks SHA256, runs `install`. Nothing else. |
 | `client/inbox.md`, `client/codex-inbox/SKILL.md` | `/inbox` for Claude Code and Codex. Both apply the trust file. |
-| `AGENTS.md` | Runbook for an AI agent installing the server or joining a mailbox. |
-| `README.md` | For humans: what it is, why, 5-minute quickstart. |
+| `README.md` | For humans and their agents: what it is, how it works, setup, trust, operations. An agent can install from it alone. |
 | `test/e2e.sh` | End-to-end test on a throwaway Debian 12 VM (qemu + KVM). Never a privileged container. |
 
 ## Data and states
@@ -108,8 +107,8 @@ alice   = instructions
 ```
 
 `data`: read, report, do not act. `instructions`: act as if the local user had
-asked. Missing file means `default = data`. Read by the client files and
-`AGENTS.md`, which also explains the risk of trusting a sender whose agent got
+asked. Missing file means `default = data`. Read by the client files. The
+README explains the risk of trusting a sender whose agent got
 prompt-injected. The server does not read it.
 
 ## Release
@@ -128,7 +127,7 @@ linux amd64 and arm64 plus `SHA256SUMS` attached to a GitHub Release.
 | 3c | `admin/` (doctor) | `test/e2e.sh doctor` | codex |
 | 3d | `admin/` (backup), drop `deploy/*.py` | `test/e2e.sh backup` and retention unit tests ported from Python | codex |
 | 4 | `install.sh`, `.github/workflows/` | tag on a fork produces the Release; `install.sh` installs it in the e2e VM | codex |
-| 5 | `client/`, `AGENTS.md`, `README.md` | a fresh `claude -p` given only `AGENTS.md` installs in the e2e VM and exchanges a message | me, prose shown first |
+| 5 | `client/`, `README.md` | a fresh `claude -p` given only the README installs in the e2e VM and exchanges a message | me, prose shown first |
 
 ## Out
 
