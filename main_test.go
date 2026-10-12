@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sarfios20/mcp-agent-mailbox/mailbox"
@@ -194,4 +195,23 @@ func callTool[Out any](t *testing.T, session *mcp.ClientSession, name string, ar
 		t.Fatalf("decode %q output: %v", name, err)
 	}
 	return out
+}
+
+// Catches the handshake timeout being lost (gliderlabs clears conn deadlines on
+// every read) and authenticated connections being cut by the same timer.
+func TestHandshakeTimeoutClosesSilentConnectionsOnly(t *testing.T) {
+	address, keys, _ := startSSHTestServer(t)
+	client := dialSSHTestClient(t, address, keys["alice"])
+	silent, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silent.Close()
+	_ = silent.SetReadDeadline(time.Now().Add(handshakeTimeout + 2*time.Second))
+	if _, err := io.Copy(io.Discard, silent); err != nil {
+		t.Fatalf("silent connection still open after %s: %v", handshakeTimeout, err)
+	}
+	if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+		t.Fatalf("authenticated connection closed by the handshake timer: %v", err)
+	}
 }

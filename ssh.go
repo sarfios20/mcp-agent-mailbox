@@ -25,7 +25,7 @@ import (
 )
 
 type participantContextKey struct{}
-type connectionContextKey struct{}
+type handshakeTimerContextKey struct{}
 
 type authWindow struct {
 	started  time.Time
@@ -45,7 +45,7 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 	server.ServerConfigCallback = func(ctx gliderssh.Context) *ssh.ServerConfig {
 		return &ssh.ServerConfig{AuthLogCallback: func(metadata ssh.ConnMetadata, method string, err error) {
 			if method == "publickey" && err == nil {
-				_ = ctx.Value(connectionContextKey{}).(net.Conn).SetDeadline(time.Time{})
+				ctx.Value(handshakeTimerContextKey{}).(*time.Timer).Stop()
 				return
 			}
 			if err == nil || method == "none" {
@@ -176,8 +176,8 @@ func newSSHServer(store *mailbox.Store, dataDir string) (*gliderssh.Server, erro
 	}
 	// Start one keepalive loop per authenticated connection, regardless of channel count.
 	server.ConnCallback = func(ctx gliderssh.Context, conn net.Conn) net.Conn {
-		_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
-		ctx.SetValue(connectionContextKey{}, conn)
+		// A deadline would not work: gliderlabs resets it on every read and write.
+		ctx.SetValue(handshakeTimerContextKey{}, time.AfterFunc(handshakeTimeout, func() { _ = conn.Close() }))
 		go func() {
 			ticker := time.NewTicker(keepaliveInterval)
 			defer ticker.Stop()
