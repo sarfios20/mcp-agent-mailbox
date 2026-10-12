@@ -70,7 +70,7 @@ step "boot VM"
 mkdir -p "$CACHE"
 [ -f "$CACHE/base.qcow2" ] || curl -fsSL -o "$CACHE/base.qcow2" "$IMAGE_URL"
 qemu-img create -q -f qcow2 -b "$CACHE/base.qcow2" -F qcow2 "$W/disk.qcow2" 4G
-for k in admin alice bob carol mallory; do ssh-keygen -q -t ed25519 -N '' -f "$W/$k"; done
+for k in admin alice bob carol dave mallory; do ssh-keygen -q -t ed25519 -N '' -f "$W/$k"; done
 mkdir "$W/seed"
 printf 'instance-id: e2e\nlocal-hostname: e2e\n' > "$W/seed/meta-data"
 printf '#cloud-config\nssh_authorized_keys:\n  - %s\n' "$(cat "$W/admin.pub")" > "$W/seed/user-data"
@@ -188,6 +188,30 @@ call alice send '{"to":[],"subject":"x","text":"x"}' | iserr || fail "empty to a
 call alice send '{"to":["bob","bob"],"subject":"x","text":"x"}' | iserr || fail "duplicate to accepted"
 call alice send '{"to":["alice"],"subject":"x","text":"x"}' | iserr || fail "sending to yourself accepted"
 call alice send '{"to":["nobody"],"subject":"x","text":"x"}' | iserr || fail "unknown recipient accepted"
+
+# invite/join: dave joins with a key nobody registered by hand.
+mbx mallory join nothing-pending </dev/null >/dev/null 2>&1 && fail "unknown key got a session with no invite pending"
+vm 'sudo mcp-agent-mailbox invite alice --host e2e-vps' >/dev/null 2>&1 && fail "invite for an existing participant accepted"
+vm 'sudo mcp-agent-mailbox invite dave --host e2e-vps' > "$W/invite.json" || fail "invite dave failed"
+jq -e --arg kh "$(cat "$W/known_hosts")" '.name == "dave" and .expires_at and .client.known_hosts == $kh' "$W/invite.json" >/dev/null \
+  || fail "invite output lacks name, expires_at or the same known_hosts line: $(cat "$W/invite.json")"
+jq -r .client.join "$W/invite.json" | grep -q -- '-i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@e2e-vps join ' || fail "join command is not the add-style ssh command"
+token=$(jq -r .client.join "$W/invite.json" | awk '{print $NF}')
+mbx mallory mcp </dev/null >/dev/null 2>&1 && fail "unregistered key got mcp while an invite is pending"
+mbx mallory wait </dev/null >/dev/null 2>&1 && fail "unregistered key got wait while an invite is pending"
+mbx mallory join wrong-token </dev/null >/dev/null 2>&1 && fail "wrong invite token accepted"
+mbx alice join "$token" </dev/null >/dev/null 2>&1 && fail "a registered key used an invite"
+mbx dave join "$token" </dev/null > "$W/dave.json" || fail "dave could not join"
+jq -e '.name == "dave" and (.client.claude_code | endswith("mailbox@e2e-vps mcp")) and (.client.wait | endswith("mailbox@e2e-vps wait"))' "$W/dave.json" >/dev/null \
+  || fail "join output is not add's output: $(cat "$W/dave.json")"
+mbx mallory join "$token" </dev/null >/dev/null 2>&1 && fail "used invite accepted again"
+call dave participants '{}' | sc | jq -e '.participants | index("dave")' >/dev/null || fail "dave cannot use the mailbox after joining"
+t1=$(vm 'sudo mcp-agent-mailbox invite erin --host e2e-vps' | jq -r .client.join | awk '{print $NF}')
+t2=$(vm 'sudo mcp-agent-mailbox invite erin --host e2e-vps' | jq -r .client.join | awk '{print $NF}')
+mbx mallory join "$t1" </dev/null >/dev/null 2>&1 && fail "replaced invite accepted"
+vm 'sudo mcp-agent-mailbox remove erin' | jq -e '.removed == true' >/dev/null || fail "remove did not report the pending invite"
+mbx mallory join "$t2" </dev/null >/dev/null 2>&1 && fail "invite accepted after remove"
+mbx mallory mcp </dev/null >/dev/null 2>&1 && fail "unknown key accepted with no invite pending"
 
 vm 'sudo mcp-agent-mailbox remove bob' | jq -e '.removed == true' >/dev/null || fail "remove bob failed"
 vm 'sudo mcp-agent-mailbox remove bob' | jq -e '.removed == false' >/dev/null || fail "second remove is not idempotent"

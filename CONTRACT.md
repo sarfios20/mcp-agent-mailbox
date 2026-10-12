@@ -45,6 +45,7 @@ threads(id, subject, created_by, created_at)
 thread_members(thread_id, participant, added_at)  -- PK (thread_id, participant)
 messages(id, thread_id, sender, content, created_at)
 receipts(message_id, participant, read_at NULL)   -- PK (message_id, participant)
+invites(token_hash, name, host, expires_at)       -- PK token_hash, name UNIQUE
 ```
 
 - RFC 3339 UTC, set by the server. No migrations: there are no installs yet.
@@ -59,6 +60,10 @@ receipts(message_id, participant, read_at NULL)   -- PK (message_id, participant
   sent after joining only.
 - Removing a participant deletes their `participants` row only. Their
   messages, memberships and receipts stay.
+- An invite is pending until it is used (`join` deletes it and inserts the
+  participant in one transaction), replaced (a new invite for the same name),
+  removed (`remove <name>`) or expired (`expires_at` past; rows are pruned
+  when the next invite is created). Only the SHA-256 of the token is stored.
 
 The data directory (default `/var/lib/mcp-agent-mailbox`) holds `mailbox.db`,
 `host_ed25519_key` (created on first `serve`, never replaced) and
@@ -92,10 +97,16 @@ whole thread always fits in one `read_thread` result an SDK client accepts.
   the key still belongs to that participant. The keepalive tick closes
   connections whose key was removed or replaced.
 - Only public key auth. Key types: ed25519, ecdsa, rsa of 2048 bits or more.
+- A key that is not registered is accepted only while some invite is pending,
+  and then only for `join`. Without pending invites it is refused at auth.
 - Only `session` channels with an `exec` request are accepted. Commands:
   - `mcp`: an MCP session over the channel's stdin/stdout as that participant.
   - `wait`: blocks until the participant has unread receipts, prints
     `{"unread": n}` and exits 0. Woken in-process when a message is stored.
+  - `join <token>`: only from a key that is not registered. Registers that
+    key under the invite's name, prints the same JSON as `add` and exits 0.
+    The connection closes after it. A wrong, used or expired token is refused
+    and counts as a failed auth attempt for that IP.
   - Anything else, no command, shell, pty, subsystems, env, port or agent
     forwarding: refused, exit status 1 and a one-line reason on stderr.
 - Limits in `config.go`: failed auth attempts per IP per minute, concurrent
@@ -106,8 +117,8 @@ whole thread always fits in one `read_thread` result an SDK client accepts.
 Every subcommand is non-interactive, prints one JSON object on stdout, and on
 failure prints `{"error": "...", "detail": ...}` on stderr. Exit 0 ok, 1 failed,
 2 bad usage. Admin subcommands are idempotent. `--data <dir>` (default
-`/var/lib/mcp-agent-mailbox`) is accepted by `serve`, `add`, `remove` and
-`backup`.
+`/var/lib/mcp-agent-mailbox`) is accepted by `serve`, `add`, `invite`,
+`remove` and `backup`.
 
 - `serve [--data DIR] [--port N]`: the server. Creates the host key and
   database if missing, writes `server.json`. Refuses a data directory that
@@ -125,7 +136,14 @@ failure prints `{"error": "...", "detail": ...}` on stderr. Exit 0 ok, 1 failed,
   line for `[host]:port`), `claude_code` (the `claude mcp add` command),
   `codex_toml`, `wait` (the `ssh ... wait` command). Client commands use
   `ssh -p <port> -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@<host>`.
-- `remove <name>`: deletes the participant. Output `{"removed": bool, "name"}`.
+- `invite <name> --host <host>`: creates a one-time invite valid for 24 h
+  and prints `{"name", "expires_at", "client": {"known_hosts", "join"}}`,
+  where `join` is the full `ssh ... join <token>` command (same ssh options
+  as `add`). Error if `name` is already a participant. A new invite for the
+  same name replaces the old one. The one admin subcommand that is not
+  idempotent: each call prints a new token.
+- `remove <name>`: deletes the participant and any pending invite for that
+  name. Output `{"removed": bool, "name"}`, true if either existed.
 - `doctor`: prints `{"ok": bool, "checks": [{"name", "pass", "detail"}]}` on
   stdout and exits 1 if any check fails (the one exception to the error
   convention). Checks: service active, port listening, SSH handshake on
@@ -168,10 +186,12 @@ threads, 7 `add_to_thread` (all on the tunnel design).
 | 9 | `admin/` (drop sshd drop-in, tunnel users, OS check, `/etc` config; doctor, uninstall, backup as `mailbox`) | `test/e2e.sh backup`, `go test ./...` | codex |
 | 10 | `ssh.go`, `mailbox/` (`wait`) | `test/e2e.sh backup` with the wait checks | codex |
 | 11 | `client/`, `README.md` | a fresh `claude -p` given only the README installs in the e2e VM and exchanges a message | me, prose shown first |
+| 12 | `mailbox/`, `ssh.go`, `config.go`, `main.go`, `admin/` (invite, remove, shared client commands), `main_test.go` | `test/e2e.sh add` with the invite checks, `go test ./...` | codex |
+| 13 | `README.md`, `client/` | a fresh `claude -p` joins from an invite alone | me, prose shown first |
 
 ## Out
 
-Invite/join flow, Docker, HTTPS, Codex wait loop, web UI, removing thread
+Participants inviting others (only the admin invites), Docker, HTTPS, Codex wait loop, web UI, removing thread
 members, participant descriptions, pagination, MCP registry listing, project
 domain.
 
