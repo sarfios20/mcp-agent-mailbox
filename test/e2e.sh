@@ -130,7 +130,7 @@ if [ $LEVEL -ge 4 ]; then
 # ----------------------------------------------------------------- backup
 step "backup"
 vm 'sudo mcp-agent-mailbox backup' | jq -e . >/dev/null || fail "backup failed"
-vm 'cd /var/backups/mcp-agent-mailbox && f=$(ls *.sqlite | tail -1) && sudo sha256sum --check --quiet "${f%.sqlite}.sha256" && sudo sqlite3 "$f" "select count(*) from messages" | grep -qx 1' \
+vm "sudo sh -c 'cd /var/backups/mcp-agent-mailbox && f=\$(ls *.sqlite | tail -1) && sha256sum --check --quiet \"\${f%.sqlite}.sha256\" && sqlite3 \"\$f\" \"select count(*) from messages\" | grep -qx 1'" \
   || fail "backup missing, checksum wrong or messages lost"
 fi
 

@@ -15,5 +15,4 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_UNIX
-ReadOnlyPaths={{.DataDir}}
-ReadWritePaths={{.BackupDir}} /run/lock
+ReadWritePaths={{.DataDir}} {{.BackupDir}} /run/lock

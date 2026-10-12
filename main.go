@@ -224,7 +224,7 @@ func main() {
 // run validates subcommand arguments and returns the CLI exit status.
 func run(args []string) int {
 	usage := func() int {
-		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve | install [--port N] | add <name> --pubkey <file|-> --host <ssh-host> | remove <name> | doctor | uninstall"})
+		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"error": "usage: mcp-agent-mailbox serve | install [--port N] | add <name> --pubkey <file|-> --host <ssh-host> | remove <name> | doctor | backup | uninstall"})
 		return 2
 	}
 	if len(args) == 0 {
@@ -279,6 +279,11 @@ func run(args []string) int {
 		if !diagnosis.OK {
 			exitCode = 1
 		}
+	case "backup":
+		if len(args) != 1 {
+			return usage()
+		}
+		result, err = admin.Backup()
 	case "uninstall":
 		if len(args) != 1 {
 			return usage()

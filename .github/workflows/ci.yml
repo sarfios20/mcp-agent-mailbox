@@ -22,8 +22,6 @@ jobs:
         run: go test ./...
       - name: Vet
         run: go vet ./...
-      - name: Test backup retention
-        run: python3 -m unittest deploy/test_buzon_backup.py
       - name: Build static Linux binary
         env:
           CGO_ENABLED: "0"

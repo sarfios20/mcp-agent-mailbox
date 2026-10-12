@@ -15,6 +15,16 @@ const (
 	DataDir = "/var/lib/mcp-agent-mailbox"
 	// BackupDir holds verified backups retained across uninstall.
 	BackupDir = "/var/backups/mcp-agent-mailbox"
+	// BackupLockPath serializes manual and scheduled backups with an exclusive flock.
+	BackupLockPath = "/run/lock/mcp-agent-mailbox-backup.lock"
+	// BackupDailyCount retains the newest snapshot in each of the latest distinct days.
+	BackupDailyCount = 3
+	// BackupWeeklyCount retains the newest snapshot in each of the latest distinct ISO weeks.
+	BackupWeeklyCount = 2
+	// BackupMonthlyCount retains the newest snapshot in each of the latest distinct months.
+	BackupMonthlyCount = 12
+	// BackupYearlyCount retains the newest snapshot in each of the latest distinct years.
+	BackupYearlyCount = 1
 	// DropInPath is the only SSH configuration file managed by this package.
 	DropInPath = "/etc/ssh/sshd_config.d/10-mcp-agent-mailbox.conf"
 	// KeysDir holds root-owned public keys outside tunnel users' home directories.
