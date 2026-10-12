@@ -31,6 +31,7 @@ except the copyright line in `LICENSE`.
 | `client/inbox.md`, `client/codex-inbox/SKILL.md` | `/inbox` for Claude Code and Codex. Both apply the trust file. |
 | `AGENTS.md` | Runbook for an AI agent installing the server or joining a mailbox. |
 | `README.md` | For humans: what it is, why, 5-minute quickstart. |
+| `test/e2e.sh` | End-to-end test on a throwaway Debian 12 VM (qemu + KVM). Never a privileged container. |
 
 ## Data and states
 
@@ -61,22 +62,27 @@ failure prints `{"error": "...", "detail": ...}` on stderr. Exit 0 ok, 1 failed,
 - `serve`: the server. Config from `MAILBOX_DB`, `MAILBOX_TOKENS_FILE`,
   `MAILBOX_ADDR` (must be loopback).
 - `install [--port N]` (default 8765): system user `mailbox`, data in
-  `/var/lib/mcp-agent-mailbox`, config in `/etc/mcp-agent-mailbox`, service and
-  daily backup timer enabled and started. Fails naming the process if the port
+  `/var/lib/mcp-agent-mailbox`, config in `/etc/mcp-agent-mailbox`
+  (`tokens.json`, `config.json` with the port), backups in
+  `/var/backups/mcp-agent-mailbox`, units `mcp-agent-mailbox.service`,
+  `mcp-agent-mailbox-backup.service` and `.timer`, enabled and started.
+  Copies itself to `/usr/local/bin/mcp-agent-mailbox`. Fails naming the process if the port
   is taken.
 - `add <name> --pubkey <file|-> --host <ssh-host>`: Unix user `mailbox-<name>`
   in group `mailbox-tunnel`, `authorized_keys` with
   `restrict,port-forwarding,permitopen="127.0.0.1:<port>"`, new token, service
-  restart. Output carries the token and ready-to-paste client config: ssh
-  config entry, tunnel unit (systemd user / launchd / Windows scheduled task),
-  `claude mcp add` command and Codex TOML.
+  restart. Same name and key again returns the same token. Output keys:
+  `name`, `token`, `ssh_user`, and `client` with ready-to-paste strings
+  `ssh_config`, `tunnel_systemd`, `tunnel_launchd`, `tunnel_windows`,
+  `claude_code`, `codex_toml`.
 - `remove <name>`: deletes the token and the Unix user. Keeps messages.
 - `doctor`: list of checks with pass/fail: service active, listening on
   loopback only, 401 without token, sshd drop-in valid, last backup age.
 - `backup`: Go port of `buzon-backup.py`, same retention (3 days, 2 weeks,
   12 months, 1 year), never deletes unverified files.
-- `uninstall`: stops and removes service, units, users and drop-in. Leaves
-  data and config in place and says where.
+- `uninstall`: stops and removes units, tunnel users, group `mailbox-tunnel`
+  and the drop-in. Keeps the `mailbox` system user, data, config and backups,
+  and says where they are.
 
 ## SSH safety
 
@@ -113,9 +119,12 @@ linux amd64 and arm64 plus `SHA256SUMS` attached to a GitHub Release.
 |---|---|---|---|
 | 1 | Clean copy of the private repo, `LICENSE` | `grep -rniE --exclude=LICENSE --exclude=CONTRACT.md --exclude-dir=.git '<private names>' .` finds nothing, `go test ./...` | me |
 | 2 | `*.go`, `mailbox/`, `go.mod` | `go test ./...` green; no Spanish left in `*.go` | codex |
-| 3 | `admin/`, `main.go`, `config.go` | `test/e2e.sh`: clean Debian in a systemd container, `install`, two `add`, A sends and B reads through tunnels, 401 without token, `doctor` all pass | codex |
-| 4 | `install.sh`, `.github/workflows/` | tag on a fork produces the Release; `install.sh` installs it in the e2e container | codex |
-| 5 | `client/`, `AGENTS.md`, `README.md` | a fresh `claude -p` given only `AGENTS.md` installs in the container and exchanges a message | me, prose shown first |
+| 3a | `main.go`, `config.go`, `admin/` (install, uninstall, units, drop-in), old `deploy/` units | `test/e2e.sh install` | codex |
+| 3b | `admin/` (add, remove) | `test/e2e.sh add` | codex |
+| 3c | `admin/` (doctor) | `test/e2e.sh doctor` | codex |
+| 3d | `admin/` (backup), drop `deploy/*.py` | `test/e2e.sh backup` and retention unit tests ported from Python | codex |
+| 4 | `install.sh`, `.github/workflows/` | tag on a fork produces the Release; `install.sh` installs it in the e2e VM | codex |
+| 5 | `client/`, `AGENTS.md`, `README.md` | a fresh `claude -p` given only `AGENTS.md` installs in the e2e VM and exchanges a message | me, prose shown first |
 
 ## Out
 
