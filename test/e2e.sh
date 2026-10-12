@@ -185,6 +185,27 @@ kill -0 $wp 2>/dev/null && fail "wait did not wake within 3 s of a new message"
 wait $wp || fail "wait exited non-zero: $(cat "$W/wait.out")"
 jq -e '.unread == 1' "$W/wait.out" >/dev/null || fail "wait output is not {\"unread\": 1}: $(cat "$W/wait.out")"
 
+# mute: a muted thread does not wake wait; inbox still lists it, marked muted.
+call carol read_thread '{"thread_id":4}' >/dev/null
+call carol mute '{"thread_id":2}' | sc | jq -e '.thread_id == 2 and .muted == true' >/dev/null || fail "carol could not mute thread 2"
+call carol mute '{"thread_id":2}' | sc | jq -e '.muted == true' >/dev/null || fail "muting twice failed"
+call bob mute '{"thread_id":4}' | iserr || fail "non-member muted a thread"
+call alice reply '{"thread_id":2,"text":"muted for carol"}' >/dev/null
+call carol inbox '{}' | sc | jq -e '.threads[] | select(.thread_id == 2) | .muted == true and .unread == 1' >/dev/null || fail "inbox does not list the muted thread as muted and unread"
+call carol read_thread '{"thread_id":1}' | sc | jq -e '.thread.muted == false' >/dev/null || fail "read_thread lacks muted false on a watched thread"
+mbx carol wait </dev/null > "$W/wait.out" 2>&1 & wp=$!; PIDS+=($wp)
+sleep 3
+kill -0 $wp 2>/dev/null || fail "wait woke for a muted thread: $(cat "$W/wait.out")"
+call alice send '{"to":["carol"],"subject":"new","text":"a new thread wakes you"}' | sc | jq -e '.thread_id == 5' >/dev/null || fail "send of thread 5 failed"
+for _ in 1 2 3 4 5 6; do kill -0 $wp 2>/dev/null || break; sleep 0.5; done
+kill -0 $wp 2>/dev/null && fail "wait did not wake for a new thread while another is muted"
+wait $wp || fail "wait exited non-zero: $(cat "$W/wait.out")"
+jq -e '.unread == 1' "$W/wait.out" >/dev/null || fail "wait counted muted unread: $(cat "$W/wait.out")"
+call carol read_thread '{"thread_id":5}' >/dev/null
+call carol unmute '{"thread_id":2}' | sc | jq -e '.muted == false' >/dev/null || fail "carol could not unmute thread 2"
+timeout 5 bash -c "$(declare -f mbx mbxssh); W='$W' MAILBOX_PORT=$MAILBOX_PORT mbx carol wait </dev/null" | jq -e '.unread == 1' >/dev/null || fail "wait did not return at once after unmute"
+call carol read_thread '{"thread_id":2}' >/dev/null
+
 call alice send '{"to":[],"subject":"x","text":"x"}' | iserr || fail "empty to accepted"
 call alice send '{"to":["bob","bob"],"subject":"x","text":"x"}' | iserr || fail "duplicate to accepted"
 call alice send '{"to":["alice"],"subject":"x","text":"x"}' | iserr || fail "sending to yourself accepted"

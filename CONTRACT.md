@@ -42,7 +42,7 @@ except the copyright line in `LICENSE`.
 ```sql
 participants(name, public_key, added_at)          -- PK name, public_key UNIQUE
 threads(id, subject, created_by, created_at)
-thread_members(thread_id, participant, added_at)  -- PK (thread_id, participant)
+thread_members(thread_id, participant, added_at, muted)  -- PK (thread_id, participant), muted 0/1
 messages(id, thread_id, sender, content, created_at)
 receipts(message_id, participant, read_at NULL)   -- PK (message_id, participant)
 invites(token_hash, name, host, expires_at)       -- PK token_hash, name UNIQUE
@@ -56,6 +56,10 @@ invites(token_hash, name, host, expires_at)       -- PK token_hash, name UNIQUE
 - A new message gets one receipt per member except its sender, at insert time.
 - A receipt is `unread` (`read_at IS NULL`) → `read`, only when its
   participant calls `read_thread`. One member reading never affects another.
+- A membership is `watched` (`muted = 0`, the default for new members) or
+  `muted`, switched only by that member with `mute` / `unmute`. Muting
+  changes only what wakes `wait`: receipts are still created and the member
+  can still read and write in the thread.
 - A member added later sees the whole history and gets receipts for messages
   sent after joining only.
 - Removing a participant deletes their `participants` row only. Their
@@ -77,14 +81,18 @@ subcommands switch to that user before opening it.
   current participant except the sender, expanded at send time.
 - `reply(thread_id, text)`: to every member except the sender.
 - `read_thread(thread_id)`: marks the caller's receipts read. Each message
-  carries `unread` for the caller. Thread carries `participants`.
-- `inbox()`: threads with unread receipts for the caller, with `participants`.
+  carries `unread` for the caller. Thread carries `participants` and `muted`
+  (the caller's).
+- `inbox()`: threads with unread receipts for the caller, with
+  `participants` and `muted` (the caller's).
+- `mute(thread_id)`, `unmute(thread_id)`: set the caller's `muted` for that
+  thread and return `{"thread_id", "muted"}`. Repeating is not an error.
 - `add_to_thread(thread_id, names)`: any member adds participants.
 - `participants()`: every participant name.
 
 None accepts the sender: it comes from the SSH key. Errors: empty or
 duplicate `to`, the sender in `to`, unknown names, a non-member reading,
-replying or adding, adding someone already in the thread.
+replying, adding or muting, adding someone already in the thread.
 Size limits in `config.go`: message text 64 KiB, subject 256 bytes, and
 1 MiB of text per thread (`reply` past it fails: start a new thread), so a
 whole thread always fits in one `read_thread` result an SDK client accepts.
@@ -101,8 +109,9 @@ whole thread always fits in one `read_thread` result an SDK client accepts.
   and then only for `join`. Without pending invites it is refused at auth.
 - Only `session` channels with an `exec` request are accepted. Commands:
   - `mcp`: an MCP session over the channel's stdin/stdout as that participant.
-  - `wait`: blocks until the participant has unread receipts, prints
-    `{"unread": n}` and exits 0. Woken in-process when a message is stored.
+  - `wait`: blocks until the participant has unread receipts in threads they
+    have not muted, prints `{"unread": n}` (counting only those) and exits 0.
+    Woken in-process when a message is stored.
   - `join <token>`: only from a key that is not registered. Registers that
     key under the invite's name, prints the same JSON as `add` and exits 0.
     The connection closes after it. A wrong, used or expired token is refused
@@ -188,6 +197,8 @@ threads, 7 `add_to_thread` (all on the tunnel design).
 | 11 | `client/`, `README.md` | a fresh `claude -p` given only the README installs in the e2e VM and exchanges a message | me, prose shown first |
 | 12 | `mailbox/`, `ssh.go`, `config.go`, `main.go`, `admin/` (invite, remove, shared client commands), `main_test.go` | `test/e2e.sh add` with the invite checks, `go test ./...` | codex |
 | 13 | `README.md`, `client/` | a fresh `claude -p` joins from an invite alone | me, prose shown first |
+| 14 | `mailbox/`, `tools.go` | `test/e2e.sh add` with the mute checks, `go test ./...` | codex |
+| 15 | `client/`, `README.md` | `/inbox watch` skips muted threads; README line shown first | me |
 
 ## Out
 
