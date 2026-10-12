@@ -1,5 +1,5 @@
-// Package buzon stores and retrieves two-participant message threads.
-package buzon
+// Package mailbox stores and retrieves two-participant message threads.
+package mailbox
 
 import (
 	"database/sql"

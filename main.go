@@ -11,7 +11,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sarfios20/mcp-agent-mailbox/buzon"
+	"github.com/sarfios20/mcp-agent-mailbox/mailbox"
 )
 
 const serverVersion = "1.0.0"
@@ -19,22 +19,22 @@ const serverVersion = "1.0.0"
 type inboxInput struct{}
 
 type readThreadInput struct {
-	ThreadID int64 `json:"thread_id" jsonschema:"Identificador del hilo que se quiere leer"`
+	ThreadID int64 `json:"thread_id" jsonschema:"ID of the thread to read"`
 }
 
 type replyInput struct {
-	ThreadID int64  `json:"thread_id" jsonschema:"Identificador del hilo al que se responde"`
-	Text     string `json:"text" jsonschema:"Texto de la respuesta"`
+	ThreadID int64  `json:"thread_id" jsonschema:"ID of the thread to reply to"`
+	Text     string `json:"text" jsonschema:"Reply text"`
 }
 
 type sendInput struct {
-	To      string `json:"to" jsonschema:"Nombre del participante destinatario"`
-	Subject string `json:"subject" jsonschema:"Asunto del nuevo hilo"`
-	Text    string `json:"text" jsonschema:"Texto del primer mensaje"`
+	To      string `json:"to" jsonschema:"Recipient participant name"`
+	Subject string `json:"subject" jsonschema:"Subject of the new thread"`
+	Text    string `json:"text" jsonschema:"First message text"`
 }
 
 type inboxOutput struct {
-	Threads []inboxEntryOutput `json:"threads" jsonschema:"Hilos con mensajes pendientes de leer"`
+	Threads []inboxEntryOutput `json:"threads" jsonschema:"Threads with unread messages"`
 }
 
 type inboxEntryOutput struct {
@@ -46,7 +46,7 @@ type inboxEntryOutput struct {
 }
 
 type readThreadOutput struct {
-	Thread threadOutput `json:"thread" jsonschema:"Hilo leído con todos sus mensajes"`
+	Thread threadOutput `json:"thread" jsonschema:"Read thread with all its messages"`
 }
 
 type threadOutput struct {
@@ -66,21 +66,21 @@ type messageOutput struct {
 }
 
 type replyOutput struct {
-	MessageID int64 `json:"message_id" jsonschema:"Identificador del mensaje creado"`
+	MessageID int64 `json:"message_id" jsonschema:"ID of the created message"`
 }
 
 type sendOutput struct {
-	ThreadID int64 `json:"thread_id" jsonschema:"Identificador del hilo creado"`
+	ThreadID int64 `json:"thread_id" jsonschema:"ID of the created thread"`
 }
 
-// newHandler construye el endpoint /mcp completo; cada petición debe llevar
-// uno de los tokens configurados y las herramientas usan su nombre asociado.
-func newHandler(store *buzon.Store, tokens map[string]string) http.Handler {
-	server := mcp.NewServer(&mcp.Implementation{Name: "buzon", Version: serverVersion}, nil)
+// newHandler builds the complete /mcp endpoint; each request must carry
+// one of the configured tokens and tools use its associated name.
+func newHandler(store *mailbox.Store, tokens map[string]string) http.Handler {
+	server := mcp.NewServer(&mcp.Implementation{Name: "mcp-agent-mailbox", Version: serverVersion}, nil)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "inbox",
-		Description: "Lista los hilos que contienen mensajes sin leer dirigidos al participante autenticado.",
+		Description: "Lists threads containing unread messages addressed to the authenticated participant.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, _ inboxInput) (*mcp.CallToolResult, inboxOutput, error) {
 		me, err := authenticatedName(req)
 		if err != nil {
@@ -105,7 +105,7 @@ func newHandler(store *buzon.Store, tokens map[string]string) http.Handler {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "read_thread",
-		Description: "Devuelve un hilo completo y marca como leídos solo los mensajes recibidos por el participante autenticado.",
+		Description: "Returns a complete thread and marks only messages received by the authenticated participant as read.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input readThreadInput) (*mcp.CallToolResult, readThreadOutput, error) {
 		me, err := authenticatedName(req)
 		if err != nil {
@@ -120,7 +120,7 @@ func newHandler(store *buzon.Store, tokens map[string]string) http.Handler {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "reply",
-		Description: "Añade una respuesta al hilo dirigida al otro participante; el remitente es siempre el participante autenticado.",
+		Description: "Adds a reply to the thread addressed to the other participant; the sender is always the authenticated participant.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input replyInput) (*mcp.CallToolResult, replyOutput, error) {
 		me, err := authenticatedName(req)
 		if err != nil {
@@ -135,7 +135,7 @@ func newHandler(store *buzon.Store, tokens map[string]string) http.Handler {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "send",
-		Description: "Crea un hilo y envía su primer mensaje; el remitente es siempre el participante autenticado.",
+		Description: "Creates a thread and sends its first message; the sender is always the authenticated participant.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input sendInput) (*mcp.CallToolResult, sendOutput, error) {
 		me, err := authenticatedName(req)
 		if err != nil {
@@ -154,7 +154,7 @@ func newHandler(store *buzon.Store, tokens map[string]string) http.Handler {
 				return &auth.TokenInfo{UserID: name}, nil
 			}
 		}
-		return nil, fmt.Errorf("bearer token desconocido: %w", auth.ErrInvalidToken)
+		return nil, fmt.Errorf("unknown bearer token: %w", auth.ErrInvalidToken)
 	}
 	mcpHandler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
@@ -179,15 +179,15 @@ func limitRequestBody(next http.Handler) http.Handler {
 
 func authenticatedName(req *mcp.CallToolRequest) (string, error) {
 	if req == nil || req.Extra == nil || req.Extra.TokenInfo == nil {
-		return "", errors.New("petición MCP sin identidad autenticada")
+		return "", errors.New("MCP request without authenticated identity")
 	}
 	if req.Extra.TokenInfo.UserID == "" {
-		return "", errors.New("petición MCP con identidad autenticada vacía")
+		return "", errors.New("MCP request with empty authenticated identity")
 	}
 	return req.Extra.TokenInfo.UserID, nil
 }
 
-func translateThread(thread buzon.Thread) threadOutput {
+func translateThread(thread mailbox.Thread) threadOutput {
 	out := threadOutput{
 		ID:       thread.ID,
 		Subject:  thread.Subject,
@@ -222,13 +222,13 @@ func main() {
 	}
 	sort.Strings(participants)
 
-	store, err := buzon.Open(config.DBPath, participants)
+	store, err := mailbox.Open(config.DBPath, participants)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
-			log.Printf("cerrar buzón: %v", err)
+			log.Printf("close mailbox: %v", err)
 		}
 	}()
 

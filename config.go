@@ -10,72 +10,72 @@ import (
 	"time"
 )
 
-// Límites del servidor HTTP. No dependen del entorno: se cambian aquí.
+// HTTP server limits. They do not depend on the environment: change them here.
 const (
-	// maxRequestBodyBytes es el tamaño máximo de una petición MCP; por encima responde 413.
+	// maxRequestBodyBytes is the maximum MCP request size; larger requests receive 413.
 	maxRequestBodyBytes int64 = 1 << 20
-	// readHeaderTimeout acota cuánto puede tardar un cliente en mandar las cabeceras.
+	// readHeaderTimeout limits how long a client can take to send headers.
 	readHeaderTimeout = 5 * time.Second
-	// readTimeout acota la lectura de la petición completa, cuerpo incluido.
+	// readTimeout limits reading the entire request, including its body.
 	readTimeout = 30 * time.Second
-	// writeTimeout acota cuánto puede tardar en escribirse la respuesta.
+	// writeTimeout limits how long writing the response can take.
 	writeTimeout = 60 * time.Second
-	// idleTimeout cierra las conexiones keep-alive que llevan este tiempo sin uso.
+	// idleTimeout closes keep-alive connections that have been idle for this long.
 	idleTimeout = 120 * time.Second
 )
 
-// Config reúne todos los ajustes de arranque del servidor.
+// Config holds all server startup settings.
 type Config struct {
-	// DBPath es la ruta del fichero SQLite configurada con BUZON_DB.
+	// DBPath is the SQLite file path configured with MAILBOX_DB.
 	DBPath string
-	// TokensFile es la ruta del JSON configurada con BUZON_TOKENS_FILE.
+	// TokensFile is the JSON file path configured with MAILBOX_TOKENS_FILE.
 	TokensFile string
-	// Addr es el host:puerto de escucha configurado con BUZON_ADDR.
+	// Addr is the listening host:port configured with MAILBOX_ADDR.
 	Addr string
-	// Tokens relaciona cada participante con su bearer token.
+	// Tokens maps each participant to their bearer token.
 	Tokens map[string]string
 }
 
-// loadConfig lee el entorno y el fichero de tokens, y solo devuelve una
-// configuración lista para abrir el buzón y arrancar el servidor HTTP.
+// loadConfig reads the environment and tokens file, and only returns a
+// configuration ready to open the mailbox and start the HTTP server.
 func loadConfig() (Config, error) {
-	dbPath, err := requiredEnv("BUZON_DB")
+	dbPath, err := requiredEnv("MAILBOX_DB")
 	if err != nil {
 		return Config{}, err
 	}
-	tokensFile, err := requiredEnv("BUZON_TOKENS_FILE")
+	tokensFile, err := requiredEnv("MAILBOX_TOKENS_FILE")
 	if err != nil {
 		return Config{}, err
 	}
-	addr, err := requiredEnv("BUZON_ADDR")
+	addr, err := requiredEnv("MAILBOX_ADDR")
 	if err != nil {
 		return Config{}, err
 	}
 	if err := validateAddr(addr); err != nil {
-		return Config{}, fmt.Errorf("BUZON_ADDR %q: %w", addr, err)
+		return Config{}, fmt.Errorf("MAILBOX_ADDR %q: %w", addr, err)
 	}
 
 	data, err := os.ReadFile(tokensFile)
 	if err != nil {
-		return Config{}, fmt.Errorf("BUZON_TOKENS_FILE %q: %w", tokensFile, err)
+		return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: %w", tokensFile, err)
 	}
 	var tokens map[string]string
 	if err := json.Unmarshal(data, &tokens); err != nil {
-		return Config{}, fmt.Errorf("BUZON_TOKENS_FILE %q: JSON inválido: %w", tokensFile, err)
+		return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: invalid JSON: %w", tokensFile, err)
 	}
 	if len(tokens) < 2 {
-		return Config{}, fmt.Errorf("BUZON_TOKENS_FILE %q: se requieren al menos dos participantes", tokensFile)
+		return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: at least two participants are required", tokensFile)
 	}
 	seenTokens := make(map[string]string, len(tokens))
 	for name, token := range tokens {
 		if strings.TrimSpace(name) == "" {
-			return Config{}, fmt.Errorf("BUZON_TOKENS_FILE %q: nombre de participante vacío", tokensFile)
+			return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: empty participant name", tokensFile)
 		}
 		if strings.TrimSpace(token) == "" {
-			return Config{}, fmt.Errorf("BUZON_TOKENS_FILE %q: token vacío para %q", tokensFile, name)
+			return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: empty token for %q", tokensFile, name)
 		}
 		if previous, exists := seenTokens[token]; exists {
-			return Config{}, fmt.Errorf("BUZON_TOKENS_FILE %q: token repetido para %q y %q", tokensFile, previous, name)
+			return Config{}, fmt.Errorf("MAILBOX_TOKENS_FILE %q: duplicate token for %q and %q", tokensFile, previous, name)
 		}
 		seenTokens[token] = name
 	}
@@ -86,7 +86,7 @@ func loadConfig() (Config, error) {
 func requiredEnv(name string) (string, error) {
 	value := os.Getenv(name)
 	if strings.TrimSpace(value) == "" {
-		return "", fmt.Errorf("falta %s o está vacía", name)
+		return "", fmt.Errorf("%s is missing or empty", name)
 	}
 	return value, nil
 }
@@ -94,14 +94,14 @@ func requiredEnv(name string) (string, error) {
 func validateAddr(addr string) error {
 	host, portText, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("debe tener formato host:puerto: %w", err)
+		return fmt.Errorf("must have host:port format: %w", err)
 	}
 	if strings.TrimSpace(host) == "" {
-		return fmt.Errorf("el host está vacío")
+		return fmt.Errorf("host is empty")
 	}
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("el puerto %q no es válido", portText)
+		return fmt.Errorf("port %q is invalid", portText)
 	}
 	return nil
 }

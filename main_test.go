@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sarfios20/mcp-agent-mailbox/buzon"
+	"github.com/sarfios20/mcp-agent-mailbox/mailbox"
 )
 
 func TestRequestBodyLimit(t *testing.T) {
@@ -44,7 +44,7 @@ var testTokens = map[string]string{
 	"bea": "token-bea",
 }
 
-// Atrapa que el endpoint permita acceder sin token o con un token desconocido.
+// Catches the endpoint allowing access without a token or with an unknown token.
 func TestAuthenticationRejectsMissingAndUnknownTokens(t *testing.T) {
 	store := openHTTPTestStore(t)
 	server := httptest.NewServer(newHandler(store, testTokens))
@@ -55,7 +55,7 @@ func TestAuthenticationRejectsMissingAndUnknownTokens(t *testing.T) {
 		token string
 	}{
 		{name: "missing"},
-		{name: "unknown", token: "token-desconocido"},
+		{name: "unknown", token: "token-unknown"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			req, err := http.NewRequest(http.MethodPost, server.URL+"/mcp", nil)
@@ -77,7 +77,7 @@ func TestAuthenticationRejectsMissingAndUnknownTokens(t *testing.T) {
 	}
 }
 
-// Atrapa que un campo sender inyectado suplante la identidad del bearer token.
+// Catches an injected sender field impersonating the bearer token identity.
 func TestSendRejectsInjectedSender(t *testing.T) {
 	store := openHTTPTestStore(t)
 	server := httptest.NewServer(newHandler(store, testTokens))
@@ -86,8 +86,8 @@ func TestSendRejectsInjectedSender(t *testing.T) {
 
 	result, err := ana.CallTool(context.Background(), &mcp.CallToolParams{Name: "send", Arguments: map[string]any{
 		"to":      "bea",
-		"subject": "estado",
-		"text":    "mensaje suplantado",
+		"subject": "status",
+		"text":    "spoofed message",
 		"sender":  "bea",
 	}})
 	if err != nil {
@@ -105,7 +105,7 @@ func TestSendRejectsInjectedSender(t *testing.T) {
 	}
 }
 
-// Atrapa que el transporte HTTP MCP impida que B vea en inbox el envío de A.
+// Catches the MCP HTTP transport preventing B from seeing A's message in inbox.
 func TestSendAppearsInRecipientsInbox(t *testing.T) {
 	store := openHTTPTestStore(t)
 	server := httptest.NewServer(newHandler(store, testTokens))
@@ -115,8 +115,8 @@ func TestSendAppearsInRecipientsInbox(t *testing.T) {
 
 	sent := callTool[sendOutput](t, ana, "send", map[string]any{
 		"to":      "bea",
-		"subject": "entrega",
-		"text":    "terminado",
+		"subject": "delivery",
+		"text":    "done",
 	})
 	inbox := callTool[inboxOutput](t, bea, "inbox", map[string]any{})
 	if got := len(inbox.Threads); got != 1 {
@@ -130,11 +130,11 @@ func TestSendAppearsInRecipientsInbox(t *testing.T) {
 	}
 }
 
-// openHTTPTestStore abre un buzón aislado que se cierra automáticamente al
-// terminar el test que lo usa.
-func openHTTPTestStore(t *testing.T) *buzon.Store {
+// openHTTPTestStore opens an isolated mailbox that closes automatically when
+// the test using it finishes.
+func openHTTPTestStore(t *testing.T) *mailbox.Store {
 	t.Helper()
-	store, err := buzon.Open(filepath.Join(t.TempDir(), "buzon.db"), []string{"ana", "bea"})
+	store, err := mailbox.Open(filepath.Join(t.TempDir(), "mailbox.db"), []string{"ana", "bea"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -146,12 +146,12 @@ func openHTTPTestStore(t *testing.T) *buzon.Store {
 	return store
 }
 
-// connectTestClient conecta un cliente MCP autenticado y registra su cierre
-// para que cada prueba use únicamente tráfico HTTP real contra httptest.
+// connectTestClient connects an authenticated MCP client and registers its cleanup
+// so each test uses only real HTTP traffic against httptest.
 func connectTestClient(t *testing.T, endpoint, token string) *mcp.ClientSession {
 	t.Helper()
 	httpClient := &http.Client{Transport: bearerTransport{token: token}}
-	client := mcp.NewClient(&mcp.Implementation{Name: "buzon-test", Version: "1.0.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "mailbox-test", Version: "1.0.0"}, nil)
 	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
 		Endpoint:             endpoint,
 		HTTPClient:           httpClient,
@@ -169,8 +169,8 @@ func connectTestClient(t *testing.T, endpoint, token string) *mcp.ClientSession 
 	return session
 }
 
-// callTool invoca una herramienta y decodifica su salida estructurada en el
-// tipo esperado por el test.
+// callTool invokes a tool and decodes its structured output into the
+// type expected by the test.
 func callTool[Out any](t *testing.T, session *mcp.ClientSession, name string, arguments any) Out {
 	t.Helper()
 	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: arguments})
