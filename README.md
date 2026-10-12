@@ -11,10 +11,11 @@ Two uses:
 
 ## How it works
 
-The server is one static binary with its own SSH server on port 2222. It does not touch the system's sshd. There are no accounts, passwords or tokens: the public key is the identity. The server refuses keys it does not know, and anything other than its two commands:
+The server is one static binary with its own SSH server on port 2222. It does not touch the system's sshd. There are no accounts or passwords: the public key is the identity. The server refuses keys it does not know, except to redeem an invite, and anything other than its three commands:
 
 - `ssh ... mcp` is an MCP session over stdio, as the participant that key belongs to.
 - `ssh ... wait` blocks until that participant has something unread, then exits. It spends no tokens while it waits.
+- `ssh ... join <token>` redeems an invite and registers the key that ran it.
 
 | Tool | What it does |
 |---|---|
@@ -41,48 +42,74 @@ The script downloads the binary for your architecture, checks its SHA256 and run
 
 Without systemd, run `mcp-agent-mailbox serve --data DIR --port N` under whatever supervisor you have.
 
-### 2. A participant
+### 2. Invite a participant
 
-On the participant's machine, create a key just for the mailbox:
+On the server:
 
 ```sh
-ssh-keygen -t ed25519 -N '' -f ~/.ssh/mcp-agent-mailbox
+sudo mcp-agent-mailbox invite alice --host mailbox.example.com
 ```
 
-Send the `.pub` file to whoever runs the server. They add it from their machine:
+`--host` is the name or IP the participant uses to reach the server. It prints a one-time invite, valid for 24 hours:
+
+```json
+{
+  "client": {
+    "join": "ssh -p 2222 -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@mailbox.example.com join 3q2X...",
+    "known_hosts": "[mailbox.example.com]:2222 ssh-ed25519 AAAA..."
+  },
+  "expires_at": "2026-10-13T18:00:00Z",
+  "name": "alice"
+}
+```
+
+Send it to alice over a private channel. Whoever uses it first becomes alice.
+
+### 3. Join
+
+On alice's machine:
+
+1. Create a key just for the mailbox:
+
+   ```sh
+   mkdir -p -m 700 ~/.ssh
+   ssh-keygen -t ed25519 -N '' -f ~/.ssh/mcp-agent-mailbox
+   ```
+
+2. Append the `known_hosts` line to `~/.ssh/known_hosts`, so the first connection already checks the server's key.
+3. Run the `join` command. It registers the key as alice and prints the client setup, ready to paste:
+
+   ```json
+   {
+     "client": {
+       "known_hosts": "[mailbox.example.com]:2222 ssh-ed25519 AAAA...",
+       "claude_code": "claude mcp add --scope user mailbox -- ssh -p 2222 -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@mailbox.example.com mcp",
+       "codex_toml": "[mcp_servers.mailbox]\ncommand = \"ssh\"\nargs = [...]\n",
+       "wait": "ssh -p 2222 -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@mailbox.example.com wait"
+     },
+     "name": "alice"
+   }
+   ```
+
+If you already have someone's public key, `add` skips the invite and prints the same JSON:
 
 ```sh
 ssh server sudo mcp-agent-mailbox add alice --pubkey - --host mailbox.example.com < alice.pub
 ```
 
-`--host` is the name or IP the participant uses to reach the server. The output is JSON with what the participant needs, ready to paste:
+### 4. The client
 
-```json
-{
-  "client": {
-    "known_hosts": "[mailbox.example.com]:2222 ssh-ed25519 AAAA...",
-    "claude_code": "claude mcp add --scope user mailbox -- ssh -p 2222 -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@mailbox.example.com mcp",
-    "codex_toml": "[mcp_servers.mailbox]\ncommand = \"ssh\"\nargs = [...]\n",
-    "wait": "ssh -p 2222 -i ~/.ssh/mcp-agent-mailbox -o IdentitiesOnly=yes mailbox@mailbox.example.com wait"
-  },
-  "name": "alice"
-}
-```
+Still on alice's machine:
 
-### 3. The client
-
-Back on the participant's machine:
-
-1. Append the `known_hosts` line to `~/.ssh/known_hosts`, so the first connection already checks the server's key.
-2. Claude Code: run the `claude_code` command. Codex: add `codex_toml` to `~/.codex/config.toml`.
-3. Install `/inbox`: copy [`client/inbox.md`](client/inbox.md) to `~/.claude/commands/inbox.md`, or [`client/codex-inbox/SKILL.md`](client/codex-inbox/SKILL.md) to `~/.codex/skills/inbox/SKILL.md`.
-4. Optionally, write `~/.config/mcp-agent-mailbox/trust` (see [Trust](#trust)).
+1. Claude Code: run the `claude_code` command. Codex: add `codex_toml` to `~/.codex/config.toml`.
+2. Install `/inbox`: copy [`client/inbox.md`](client/inbox.md) to `~/.claude/commands/inbox.md`, or [`client/codex-inbox/SKILL.md`](client/codex-inbox/SKILL.md) to `~/.codex/skills/inbox/SKILL.md`.
+3. Optionally, write `~/.config/mcp-agent-mailbox/trust` (see [Trust](#trust)).
 
 To check it, run the `wait` command: it should block if there is nothing unread.
 
 ### Or let your agent do it
 
-Everything above is commands and JSON. Give your agent this README and SSH access to the server, and ask it to set up the mailbox and add you. If the server belongs to someone else, your agent creates the key, you send them the `.pub`, and their agent sends back the `client` output.
+Everything above is commands and JSON. To set up the server, give your agent this README and SSH access to it. To join, give your agent this README and the invite.
 
 ## Trust
 
@@ -90,7 +117,7 @@ The server only guarantees who sent a message. What your agent does with it is u
 
 ```
 default = data
-alice   = instructions
+bob     = instructions
 ```
 
 - `data`: your agent tells you what the message says and does nothing else. It suggests a reply and waits for you.
@@ -111,7 +138,7 @@ Codex has no background wait yet: run `$inbox` when you want it to look.
 
 ## Operations
 
-All subcommands print JSON and are safe to run twice.
+All subcommands print JSON. All but `invite` are safe to run twice.
 
 - `sudo mcp-agent-mailbox doctor` checks the service, the port, the host key, the backup timer and that the last backup is under 48 h old. It exits 1 if something fails.
 - `sudo mcp-agent-mailbox remove alice` removes a participant. Their messages stay.
@@ -135,7 +162,7 @@ sudo systemctl start mcp-agent-mailbox
 
 ## Not included
 
-No invite links: adding someone takes their `.pub` and one command on the server. No web UI, no removing members from a thread, no HTTPS transport.
+Only the server admin can invite. No web UI, no removing members from a thread, no HTTPS transport.
 
 ## License
 
