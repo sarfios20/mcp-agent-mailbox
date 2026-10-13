@@ -9,7 +9,8 @@ const (
 	defaultPort = 2222
 	// authFailuresPerMinute limits failed key authentication attempts per IP.
 	authFailuresPerMinute = 10
-	// sessionsPerParticipant bounds concurrently open session channels per name.
+	// sessionsPerParticipant bounds concurrently open session channels per name,
+	// and per key for keys that are not registered yet.
 	sessionsPerParticipant = 8
 	// handshakeTimeout bounds SSH negotiation before authentication succeeds.
 	handshakeTimeout = 10 * time.Second

@@ -119,7 +119,9 @@ whole thread always fits in one `read_thread` result an SDK client accepts.
   - Anything else, no command, shell, pty, subsystems, env, port or agent
     forwarding: refused, exit status 1 and a one-line reason on stderr.
 - Limits in `config.go`: failed auth attempts per IP per minute, concurrent
-  sessions per participant, handshake timeout, server keepalive interval.
+  sessions per participant (per key for a key not yet registered, so one
+  without a token cannot block a join), handshake timeout, server keepalive
+  interval.
 
 ## CLI
 

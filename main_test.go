@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"path/filepath"
@@ -284,5 +286,35 @@ func TestFullThreadStillFitsOneReadThread(t *testing.T) {
 	thread := callTool[readThreadOutput](t, bob, "read_thread", map[string]any{"thread_id": sent.ThreadID})
 	if len(thread.Thread.Messages) != maxThreadBytes/maxTextBytes {
 		t.Fatalf("read %d messages, want %d", len(thread.Thread.Messages), maxThreadBytes/maxTextBytes)
+	}
+}
+
+// Catches unregistered keys sharing one session quota while an invite is
+// pending, which lets a caller without a token hold every slot and block the
+// invited key from joining.
+func TestTokenlessKeysCannotBlockJoin(t *testing.T) {
+	address, _, store := startSSHTestServer(t)
+	token := "invite-token"
+	hash := sha256.Sum256([]byte(token))
+	now := time.Now()
+	if err := store.CreateInvite("carol", "localhost", fmt.Sprintf("%x", hash), now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	squatter := dialSSHTestClient(t, address, testSigner(t))
+	for i := 0; i < sessionsPerParticipant; i++ {
+		session, err := squatter.NewSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer session.Close()
+	}
+	session, err := dialSSHTestClient(t, address, testSigner(t)).NewSession()
+	if err != nil {
+		t.Fatalf("invited key could not open a session: %v", err)
+	}
+	defer session.Close()
+	output, err := session.Output("join " + token)
+	if err != nil || !strings.Contains(string(output), `"carol"`) {
+		t.Fatalf("join failed: %v %q", err, output)
 	}
 }

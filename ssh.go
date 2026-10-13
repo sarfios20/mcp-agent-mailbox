@@ -126,19 +126,26 @@ func newSSHServer(store *mailbox.Store, dataDir string, port int) (*gliderssh.Se
 				return
 			}
 		}
+		// Unregistered keys count against their own key, so one without a token
+		// cannot take the slots of the key that joins. A public key contains a
+		// space and a name cannot, so the two never share a slot.
+		slot := name
+		if joiner {
+			slot = publicKey
+		}
 		mu.Lock()
-		if sessions[name] >= sessionsPerParticipant {
+		if sessions[slot] >= sessionsPerParticipant {
 			mu.Unlock()
 			_ = incoming.Reject(ssh.ResourceShortage, "participant session limit reached")
 			return
 		}
-		sessions[name]++
+		sessions[slot]++
 		mu.Unlock()
 		defer func() {
 			mu.Lock()
-			sessions[name]--
-			if sessions[name] == 0 {
-				delete(sessions, name)
+			sessions[slot]--
+			if sessions[slot] == 0 {
+				delete(sessions, slot)
 			}
 			mu.Unlock()
 		}()
