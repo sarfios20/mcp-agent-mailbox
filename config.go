@@ -7,7 +7,8 @@ const (
 	defaultDataDir = "/var/lib/mcp-agent-mailbox"
 	// defaultPort is the SSH port when serve or install has no port flag.
 	defaultPort = 2222
-	// authFailuresPerMinute limits failed key authentication attempts per IP.
+	// authFailuresPerMinute limits failed key authentication attempts per IP,
+	// counting every admission of a key that is not registered yet.
 	authFailuresPerMinute = 10
 	// sessionsPerParticipant bounds concurrently open session channels per name,
 	// and per key for keys that are not registered yet.

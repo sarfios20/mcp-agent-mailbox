@@ -340,3 +340,21 @@ func TestTokenlessKeysCannotBlockJoin(t *testing.T) {
 		t.Fatalf("join failed: %v %q", err, output)
 	}
 }
+
+// Catches a caller without a token rotating fresh keys to open unbounded
+// sessions while an invite is pending: every unregistered admission counts
+// against the IP's authentication window.
+func TestUnregisteredAdmissionsCountPerIP(t *testing.T) {
+	address, _, store := startSSHTestServer(t)
+	now := time.Now()
+	if err := store.CreateInvite("carol", "localhost", fmt.Sprintf("%x", sha256.Sum256([]byte("t"))), now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < authFailuresPerMinute; i++ {
+		dialSSHTestClient(t, address, testSigner(t))
+	}
+	if client, err := ssh.Dial("tcp", address, sshTestConfig(testSigner(t))); err == nil {
+		client.Close()
+		t.Fatalf("unregistered key %d in one minute from one IP was admitted", authFailuresPerMinute+1)
+	}
+}

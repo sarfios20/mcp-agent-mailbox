@@ -109,6 +109,10 @@ func newSSHServer(store *mailbox.Store, dataDir string, port int) (*gliderssh.Se
 			if err != nil || !pending {
 				return false
 			}
+			// An unregistered admission costs an attempt, so rotating fresh keys
+			// cannot open unbounded sessions while an invite is pending.
+			window.failures++
+			failures[ip] = window
 			name = ""
 		}
 		ctx.SetValue(participantContextKey{}, name)

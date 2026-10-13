@@ -122,7 +122,9 @@ JSON escaping). A thread has no size limit of its own.
   - `join <token>`: only from a key that is not registered. Registers that
     key under the invite's name, prints the same JSON as `add` and exits 0.
     The connection closes after it. A wrong, used or expired token is refused
-    and counts as a failed auth attempt for that IP.
+    and counts as a failed auth attempt for that IP. Admitting a key that is
+    not registered also counts as one, so fresh keys cannot be rotated to
+    hold unbounded sessions while an invite is pending.
   - Anything else, no command, shell, pty, subsystems, env, port or agent
     forwarding: refused, exit status 1 and a one-line reason on stderr.
 - Limits in `config.go`: failed auth attempts per IP per minute, concurrent
