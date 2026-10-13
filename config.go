@@ -20,12 +20,13 @@ const (
 	keepaliveInterval = 30 * time.Second
 	// keepaliveTimeout closes a connection whose peer does not answer a keepalive in time.
 	keepaliveTimeout = 15 * time.Second
-	// maxTextBytes caps one message's text, so threads stay readable in one tool result.
+	// maxTextBytes caps one message's text.
 	maxTextBytes = 64 << 10
 	// maxSubjectBytes caps a thread subject.
 	maxSubjectBytes = 256
-	// maxThreadBytes caps the texts of one thread together. read_thread returns the
-	// whole thread twice (structured and text) with JSON escaping, and SDK clients
-	// reject responses over 16 MiB.
-	maxThreadBytes = 1 << 20
+	// maxPageMessages caps the number of messages in one read_thread page.
+	maxPageMessages = 200
+	// maxPageBytes caps the text bytes of one page. SDK clients reject results
+	// over 16 MiB, and a page is encoded twice with JSON escaping.
+	maxPageBytes = 1 << 20
 )

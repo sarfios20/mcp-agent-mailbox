@@ -21,6 +21,7 @@ type participantsOutput struct {
 
 type readThreadInput struct {
 	ThreadID int64 `json:"thread_id" jsonschema:"ID of the thread to read"`
+	After    int64 `json:"after,omitempty" jsonschema:"Return messages with an id above this one; 0 or omitted starts at the beginning"`
 }
 
 type replyInput struct {
@@ -70,7 +71,9 @@ type inboxEntryOutput struct {
 }
 
 type readThreadOutput struct {
-	Thread threadOutput `json:"thread" jsonschema:"Read thread with all its messages"`
+	Thread    threadOutput `json:"thread" jsonschema:"Thread with one page of messages, oldest first"`
+	NextAfter int64        `json:"next_after" jsonschema:"ID of the last message in this page, or after if the page is empty; use as after for the next page"`
+	More      bool         `json:"more" jsonschema:"Whether messages remain after this page"`
 }
 
 type threadOutput struct {
@@ -136,13 +139,17 @@ func newMCPServer(store *mailbox.Store, me, publicKey string) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "read_thread",
-		Description: "Returns a complete thread with its participants, the caller's muted state and each message’s unread state before this call, then marks only the authenticated participant’s receipts read.",
+		Description: "Returns one page of a thread, oldest first, with its participants, the caller's muted state and each message’s unread state before this call. Marks only the caller’s receipts for messages in this page read. If more is true, pass next_after as after to get the next page.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input readThreadInput) (*mcp.CallToolResult, readThreadOutput, error) {
-		thread, err := store.ReadThread(me, input.ThreadID)
+		thread, more, err := store.ReadThread(me, input.ThreadID, input.After, maxPageMessages, maxPageBytes)
 		if err != nil {
 			return nil, readThreadOutput{}, err
 		}
-		return nil, readThreadOutput{Thread: translateThread(thread)}, nil
+		nextAfter := input.After
+		if len(thread.Messages) > 0 {
+			nextAfter = thread.Messages[len(thread.Messages)-1].ID
+		}
+		return nil, readThreadOutput{Thread: translateThread(thread), NextAfter: nextAfter, More: more}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -172,7 +179,7 @@ func newMCPServer(store *mailbox.Store, me, publicKey string) *mcp.Server {
 		if err := checkSize("text", input.Text, maxTextBytes); err != nil {
 			return nil, replyOutput{}, err
 		}
-		messageID, err := store.Reply(me, input.ThreadID, input.Text, maxThreadBytes)
+		messageID, err := store.Reply(me, input.ThreadID, input.Text)
 		if err != nil {
 			return nil, replyOutput{}, err
 		}

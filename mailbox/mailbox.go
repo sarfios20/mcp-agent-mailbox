@@ -352,8 +352,8 @@ func (s *Store) Send(me string, to []string, subject, text string) (threadID int
 }
 
 // Reply appends a message with unread receipts for every other thread member.
-// It fails once the thread's texts would exceed maxThreadBytes in total.
-func (s *Store) Reply(me string, threadID int64, text string, maxThreadBytes int) (messageID int64, err error) {
+// The caller must belong to the thread; the thread has no size limit.
+func (s *Store) Reply(me string, threadID int64, text string) (messageID int64, err error) {
 	if err := s.validateParticipant(me); err != nil {
 		return 0, err
 	}
@@ -371,13 +371,6 @@ func (s *Store) Reply(me string, threadID int64, text string, maxThreadBytes int
 	}
 	if err := requireMember(me, threadID, members); err != nil {
 		return 0, err
-	}
-	var size int
-	if err := tx.QueryRow("SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM messages WHERE thread_id = ?", threadID).Scan(&size); err != nil {
-		return 0, fmt.Errorf("measure thread %d: %w", threadID, err)
-	}
-	if size+len(text) > maxThreadBytes {
-		return 0, fmt.Errorf("thread %d holds %d bytes and the limit is %d; start a new thread", threadID, size, maxThreadBytes)
 	}
 	messageID, err = insertMessage(tx, me, threadID, text, time.Now().UTC().Format(timeLayout))
 	if err != nil {
@@ -528,34 +521,41 @@ SELECT ?, participant FROM thread_members WHERE thread_id = ? AND participant !=
 	return messageID, nil
 }
 
-// ReadThread returns a member's thread with Unread reflecting the state before
-// this call and the caller's Muted state, then marks only that member's receipts read.
-func (s *Store) ReadThread(me string, threadID int64) (thread Thread, err error) {
+// ReadThread returns one page of a member's thread, oldest first, with IDs above
+// after, Unread reflecting the state before this call and the caller's Muted state.
+// A page stops before exceeding maxMessages or maxBytes of text, but includes at
+// least one message when any remain. Selection and marking only the caller's
+// receipts for returned messages read share a transaction. More reports whether
+// messages remain; use the last returned ID as after for the next page.
+func (s *Store) ReadThread(me string, threadID, after int64, maxMessages, maxBytes int) (thread Thread, more bool, err error) {
+	if after < 0 {
+		return Thread{}, false, fmt.Errorf("after must be non-negative: %d", after)
+	}
 	if err := s.validateParticipant(me); err != nil {
-		return Thread{}, err
+		return Thread{}, false, err
 	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
-		return Thread{}, fmt.Errorf("begin reading thread %d as %q: %w", threadID, me, err)
+		return Thread{}, false, fmt.Errorf("begin reading thread %d as %q: %w", threadID, me, err)
 	}
 	defer tx.Rollback()
 	thread.ID = threadID
 	if err = tx.QueryRow("SELECT subject FROM threads WHERE id = ?", threadID).Scan(&thread.Subject); err != nil {
 		if err == sql.ErrNoRows {
-			return Thread{}, fmt.Errorf("thread %d does not exist", threadID)
+			return Thread{}, false, fmt.Errorf("thread %d does not exist", threadID)
 		}
-		return Thread{}, fmt.Errorf("look up thread %d for %q: %w", threadID, me, err)
+		return Thread{}, false, fmt.Errorf("look up thread %d for %q: %w", threadID, me, err)
 	}
 	thread.Participants, err = threadParticipants(tx, threadID)
 	if err != nil {
-		return Thread{}, err
+		return Thread{}, false, err
 	}
 	if err = requireMember(me, threadID, thread.Participants); err != nil {
-		return Thread{}, err
+		return Thread{}, false, err
 	}
 	if err = tx.QueryRow("SELECT muted FROM thread_members WHERE thread_id = ? AND participant = ?", threadID, me).Scan(&thread.Muted); err != nil {
-		return Thread{}, fmt.Errorf("look up mute state for thread %d as %q: %w", threadID, me, err)
+		return Thread{}, false, fmt.Errorf("look up mute state for thread %d as %q: %w", threadID, me, err)
 	}
 
 	rows, err := tx.Query(`
@@ -563,41 +563,49 @@ SELECT m.id, m.sender, m.content, m.created_at,
        r.message_id IS NOT NULL AND r.read_at IS NULL
 FROM messages AS m
 LEFT JOIN receipts AS r ON r.message_id = m.id AND r.participant = ?
-WHERE m.thread_id = ?
-ORDER BY m.id`, me, threadID)
+WHERE m.thread_id = ? AND m.id > ?
+ORDER BY m.id`, me, threadID, after)
 	if err != nil {
-		return Thread{}, fmt.Errorf("list messages in thread %d for %q: %w", threadID, me, err)
+		return Thread{}, false, fmt.Errorf("list messages in thread %d for %q: %w", threadID, me, err)
 	}
 	defer rows.Close()
+	pageBytes := 0
+	lastID := after
 	for rows.Next() {
 		var message Message
 		var createdAt string
 		if err = rows.Scan(
 			&message.ID, &message.Sender, &message.Content, &createdAt, &message.Unread,
 		); err != nil {
-			return Thread{}, fmt.Errorf("scan message in thread %d for %q: %w", threadID, me, err)
+			return Thread{}, false, fmt.Errorf("scan message in thread %d for %q: %w", threadID, me, err)
+		}
+		if len(thread.Messages) > 0 && (len(thread.Messages) >= maxMessages || len(message.Content) > maxBytes-pageBytes) {
+			more = true
+			break
 		}
 		message.CreatedAt, err = parseTime(createdAt, "created_at", message.ID)
 		if err != nil {
-			return Thread{}, err
+			return Thread{}, false, err
 		}
 		thread.Messages = append(thread.Messages, message)
+		pageBytes += len(message.Content)
+		lastID = message.ID
 	}
 	if err = rows.Err(); err != nil {
-		return Thread{}, fmt.Errorf("list messages in thread %d for %q: %w", threadID, me, err)
+		return Thread{}, false, fmt.Errorf("list messages in thread %d for %q: %w", threadID, me, err)
 	}
 	if err = rows.Close(); err != nil {
-		return Thread{}, fmt.Errorf("close messages in thread %d for %q: %w", threadID, me, err)
+		return Thread{}, false, fmt.Errorf("close messages in thread %d for %q: %w", threadID, me, err)
 	}
 	if _, err = tx.Exec(`UPDATE receipts SET read_at = ?
 WHERE participant = ? AND read_at IS NULL
-  AND message_id IN (SELECT id FROM messages WHERE thread_id = ?)`, time.Now().UTC().Format(timeLayout), me, threadID); err != nil {
-		return Thread{}, fmt.Errorf("mark thread %d read for %q: %w", threadID, me, err)
+  AND message_id IN (SELECT id FROM messages WHERE thread_id = ? AND id > ? AND id <= ?)`, time.Now().UTC().Format(timeLayout), me, threadID, after, lastID); err != nil {
+		return Thread{}, false, fmt.Errorf("mark thread %d read for %q: %w", threadID, me, err)
 	}
 	if err = tx.Commit(); err != nil {
-		return Thread{}, fmt.Errorf("commit reading thread %d as %q: %w", threadID, me, err)
+		return Thread{}, false, fmt.Errorf("commit reading thread %d as %q: %w", threadID, me, err)
 	}
-	return thread, nil
+	return thread, more, nil
 }
 
 // Inbox lists threads with messages that me has not read, newest first,

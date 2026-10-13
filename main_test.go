@@ -267,25 +267,47 @@ func TestRemovedKeyCannotOpenSessions(t *testing.T) {
 	}
 }
 
-// Catches a thread growing past what an SDK client accepts in one read_thread
-// result, which would mark it read and then lose it. Control characters are the
-// worst case for JSON escaping.
-func TestFullThreadStillFitsOneReadThread(t *testing.T) {
+// Catches read_thread returning more than an SDK client accepts (16 MiB) and
+// marking read messages the client never got: many short messages pass any
+// text cap, and control characters are the worst case for JSON escaping.
+func TestReadThreadPages(t *testing.T) {
 	address, keys, _ := startSSHTestServer(t)
 	alice := connectTestClient(t, address, keys["alice"])
 	bob := connectTestClient(t, address, keys["bob"])
+	extra := 50
+	short := callTool[sendOutput](t, alice, "send", map[string]any{"to": []string{"bob"}, "subject": "short", "text": "a"})
+	for i := 1; i < maxPageMessages+extra; i++ {
+		callTool[replyOutput](t, alice, "reply", map[string]any{"thread_id": short.ThreadID, "text": "a"})
+	}
+	first := callTool[readThreadOutput](t, bob, "read_thread", map[string]any{"thread_id": short.ThreadID})
+	if len(first.Thread.Messages) != maxPageMessages || !first.More || first.NextAfter != first.Thread.Messages[maxPageMessages-1].ID {
+		t.Fatalf("first page: %d messages, more %v, next_after %d", len(first.Thread.Messages), first.More, first.NextAfter)
+	}
+	inbox := callTool[inboxOutput](t, bob, "inbox", map[string]any{})
+	if len(inbox.Threads) != 1 || inbox.Threads[0].Unread != extra {
+		t.Fatalf("after the first page the inbox is %+v, want %d unread", inbox.Threads, extra)
+	}
+	second := callTool[readThreadOutput](t, bob, "read_thread", map[string]any{"thread_id": short.ThreadID, "after": first.NextAfter})
+	if len(second.Thread.Messages) != extra || second.More || !second.Thread.Messages[0].Unread {
+		t.Fatalf("second page: %d messages, more %v", len(second.Thread.Messages), second.More)
+	}
+	if inbox := callTool[inboxOutput](t, bob, "inbox", map[string]any{}); len(inbox.Threads) != 0 {
+		t.Fatalf("inbox not empty after reading every page: %+v", inbox.Threads)
+	}
+
 	text := strings.Repeat("\x01", maxTextBytes)
-	sent := callTool[sendOutput](t, alice, "send", map[string]any{"to": []string{"bob"}, "subject": "s", "text": text})
-	for size := len(text); size+len(text) <= maxThreadBytes; size += len(text) {
-		callTool[replyOutput](t, alice, "reply", map[string]any{"thread_id": sent.ThreadID, "text": text})
+	large := callTool[sendOutput](t, alice, "send", map[string]any{"to": []string{"bob"}, "subject": "large", "text": text})
+	for i := 0; i < maxPageBytes/maxTextBytes; i++ {
+		callTool[replyOutput](t, alice, "reply", map[string]any{"thread_id": large.ThreadID, "text": text})
 	}
-	result, err := alice.CallTool(context.Background(), &mcp.CallToolParams{Name: "reply", Arguments: map[string]any{"thread_id": sent.ThreadID, "text": text}})
+	page := callTool[readThreadOutput](t, bob, "read_thread", map[string]any{"thread_id": large.ThreadID})
+	if len(page.Thread.Messages) != maxPageBytes/maxTextBytes || !page.More {
+		t.Fatalf("large page: %d messages, more %v", len(page.Thread.Messages), page.More)
+	}
+
+	result, err := bob.CallTool(context.Background(), &mcp.CallToolParams{Name: "read_thread", Arguments: map[string]any{"thread_id": short.ThreadID, "after": -1}})
 	if err == nil && !result.IsError {
-		t.Fatalf("reply past %d bytes in a thread was accepted", maxThreadBytes)
-	}
-	thread := callTool[readThreadOutput](t, bob, "read_thread", map[string]any{"thread_id": sent.ThreadID})
-	if len(thread.Thread.Messages) != maxThreadBytes/maxTextBytes {
-		t.Fatalf("read %d messages, want %d", len(thread.Thread.Messages), maxThreadBytes/maxTextBytes)
+		t.Fatal("read_thread accepted a negative after")
 	}
 }
 

@@ -66,11 +66,11 @@ func TestReadThreadMarksOnlyReceivedMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if _, err := store.Reply("bob", threadID, "reply", 1<<20); err != nil {
+	if _, err := store.Reply("bob", threadID, "reply"); err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
 
-	thread, err := store.ReadThread("alice", threadID)
+	thread, _, err := store.ReadThread("alice", threadID, 0, 200, 1<<20)
 	if err != nil {
 		t.Fatalf("ReadThread: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestReadThreadMarksOnlyReceivedMessages(t *testing.T) {
 	if !thread.Messages[1].Unread {
 		t.Error("received message was not reported unread before marking read")
 	}
-	thread, err = store.ReadThread("alice", threadID)
+	thread, _, err = store.ReadThread("alice", threadID, 0, 200, 1<<20)
 	if err != nil {
 		t.Fatalf("second ReadThread: %v", err)
 	}
@@ -116,10 +116,10 @@ func TestNonParticipantCannotReadOrReply(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	if _, err := store.ReadThread("carol", threadID); err == nil {
+	if _, _, err := store.ReadThread("carol", threadID, 0, 200, 1<<20); err == nil {
 		t.Error("ReadThread by non-participant succeeded")
 	}
-	if _, err := store.Reply("carol", threadID, "intrusion", 1<<20); err == nil {
+	if _, err := store.Reply("carol", threadID, "intrusion"); err == nil {
 		t.Error("Reply by non-participant succeeded")
 	}
 }
@@ -168,7 +168,7 @@ func TestGroupReplyReceipts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	messageID, err := store.Reply("bob", threadID, "reply to both", 1<<20)
+	messageID, err := store.Reply("bob", threadID, "reply to both")
 	if err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
@@ -211,18 +211,18 @@ func TestAddToThreadLateMemberReceipts(t *testing.T) {
 	if len(participants) != 3 || participants[0] != "alice" || participants[1] != "bob" || participants[2] != "carol" {
 		t.Fatalf("participants = %q, want [alice bob carol]", participants)
 	}
-	thread, err := store.ReadThread("carol", threadID)
+	thread, _, err := store.ReadThread("carol", threadID, 0, 200, 1<<20)
 	if err != nil {
 		t.Fatalf("ReadThread(carol): %v", err)
 	}
 	if len(thread.Messages) != 1 || thread.Messages[0].Content != "hello bob" || thread.Messages[0].Unread {
 		t.Fatalf("old messages = %+v, want the old message with Unread false", thread.Messages)
 	}
-	messageID, err := store.Reply("alice", threadID, "welcome carol", 1<<20)
+	messageID, err := store.Reply("alice", threadID, "welcome carol")
 	if err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
-	thread, err = store.ReadThread("carol", threadID)
+	thread, _, err = store.ReadThread("carol", threadID, 0, 200, 1<<20)
 	if err != nil {
 		t.Fatalf("ReadThread(carol) after reply: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestGroupReadPreservesOtherMembersUnread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	thread, err := store.ReadThread("bob", threadID)
+	thread, _, err := store.ReadThread("bob", threadID, 0, 200, 1<<20)
 	if err != nil {
 		t.Fatalf("ReadThread(bob): %v", err)
 	}
