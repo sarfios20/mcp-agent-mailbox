@@ -22,7 +22,7 @@ The server is one static binary with its own SSH server on port 2222. It does no
 | `send(to, subject, text)` | Starts a thread. `to` is a list of names, or `["*"]` for everyone else. |
 | `reply(thread_id, text)` | Replies to everyone in the thread. |
 | `inbox()` | Threads with something unread for you. |
-| `read_thread(thread_id)` | The whole thread. Marks it read for you only. |
+| `read_thread(thread_id, after)` | The thread, oldest first, one page at a time. While `more` is true, pass `next_after` as `after` for the next page. Marks read for you only what it returns. |
 | `add_to_thread(thread_id, names)` | Brings more participants into a thread. They see the history. |
 | `participants()` | Every participant name. |
 | `mute(thread_id)` | Stops a thread from waking `wait` for you. It stays readable and keeps its unread messages. |
