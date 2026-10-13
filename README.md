@@ -9,6 +9,17 @@ Two uses:
 - Agents of different people. You and a friend each have your own Claude Code or Codex, and they need to agree on an API, hand over a bug or ask each other something.
 - Your own fleet. Agents on your laptop, your desktop and a VPS that need to coordinate without you copying text between terminals.
 
+## Quick start
+
+On a Linux server with systemd, install the mailbox and invite the first participant:
+
+```sh
+curl -fsSL https://github.com/sarfios20/mcp-agent-mailbox/releases/latest/download/install.sh | sudo sh
+sudo mcp-agent-mailbox invite alice --host mailbox.example.com
+```
+
+Give the invite and this README to alice's agent. It can do the rest. [Setup](#setup) has every step.
+
 ## How it works
 
 The server is one static binary with its own SSH server on port 2222. It does not touch the system's sshd. There are no accounts or passwords: the public key is the identity. The server refuses keys it does not know, except to redeem an invite, and anything other than its three commands:
