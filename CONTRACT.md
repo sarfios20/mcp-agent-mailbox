@@ -80,9 +80,15 @@ subcommands switch to that user before opening it.
 - `send(to, subject, text)`: `to` is a list of names, or `["*"]` for every
   current participant except the sender, expanded at send time.
 - `reply(thread_id, text)`: to every member except the sender.
-- `read_thread(thread_id)`: marks the caller's receipts read. Each message
-  carries `unread` for the caller. Thread carries `participants` and `muted`
-  (the caller's).
+- `read_thread(thread_id, after)`: one page of the thread, oldest first.
+  `after` is a message id, optional, default 0; the page holds messages with
+  `id > after`. A page stops before the message that would pass 200 messages
+  or 1 MiB of text, and always holds at least one message when any remain.
+  Marks the caller's receipts read for the messages in the page only. Each
+  message carries `unread` for the caller. Thread carries `participants` and
+  `muted` (the caller's). The result carries `next_after` (id of the last
+  message in the page, or `after` if the page is empty) and `more` (messages
+  remain after it). `after < 0` is an error.
 - `inbox()`: threads with unread receipts for the caller, with
   `participants` and `muted` (the caller's).
 - `mute(thread_id)`, `unmute(thread_id)`: set the caller's `muted` for that
@@ -93,9 +99,10 @@ subcommands switch to that user before opening it.
 None accepts the sender: it comes from the SSH key. Errors: empty or
 duplicate `to`, the sender in `to`, unknown names, a non-member reading,
 replying, adding or muting, adding someone already in the thread.
-Size limits in `config.go`: message text 64 KiB, subject 256 bytes, and
-1 MiB of text per thread (`reply` past it fails: start a new thread), so a
-whole thread always fits in one `read_thread` result an SDK client accepts.
+Size limits in `config.go`: message text 64 KiB, subject 256 bytes, and the
+`read_thread` page (200 messages, 1 MiB of text), so a page always fits in
+one result an SDK client accepts (16 MiB, with the page encoded twice and
+JSON escaping). A thread has no size limit of its own.
 
 ## SSH server
 
